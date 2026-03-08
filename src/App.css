@@ -285,6 +285,8 @@ table tr:hover td { background: rgba(255,255,255,0.02); }
 
 /* Responsive */
 @media (max-width: 768px) {
+  .navbar-brand span:not(.icon) { display: none; }
+  .navbar { padding: 0 12px; }
   .hero h1 { font-size: 2rem; }
   .hero .subtitle { font-size: 1rem; }
   .sections-grid { grid-template-columns: 1fr; }
