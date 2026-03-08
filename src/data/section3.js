@@ -161,6 +161,12 @@ export const section3 = {
 </ul>
 <p>The condition flags are critical because ARM's defining feature is <strong>conditional execution</strong> — nearly every instruction can be made conditional by adding a suffix (EQ, NE, GT, LT, etc.).</p>
 
+<h4>Condition Flags in Detail</h4>
+<p><strong>N (Negative) — Bit 31:</strong> Set to 1 when the result's most significant bit is 1, meaning the result is negative when interpreted as a signed (two's complement) number. For example, <code>SUBS R0, R1, R2</code> where R1 = 3 and R2 = 10 produces result -7 (0xFFFFFFF9), so N = 1.</p>
+<p><strong>Z (Zero) — Bit 30:</strong> Set to 1 when the result is exactly zero. For example, <code>SUBS R0, R1, R2</code> where R1 = R2 = 5 produces 0, so Z = 1. CMP uses Z to test equality: after <code>CMP R0, #10</code>, Z = 1 only if R0 equals 10.</p>
+<p><strong>C (Carry) — Bit 29:</strong> For addition, C = 1 when the addition produces a carry out of bit 31 (unsigned overflow). For example, <code>ADDS R0, R1, R2</code> where R1 = 0xFFFFFFFF and R2 = 1 produces a carry, so C = 1. For subtraction, ARM defines C as the inverse of borrow: C = 1 means no borrow occurred (i.e., the first operand was greater than or equal to the second, treating both as unsigned). <code>SUBS R0, R1, R2</code> with R1 = 10, R2 = 3 sets C = 1 (no borrow); with R1 = 3, R2 = 10 sets C = 0 (borrow occurred).</p>
+<p><strong>V (Overflow) — Bit 28:</strong> Set to 1 when the result of a signed operation exceeds the representable range. This happens when adding two positive numbers produces a negative result, or adding two negative numbers produces a positive result. For example, <code>ADDS R0, R1, R2</code> where R1 = 0x7FFFFFFF (+2,147,483,647) and R2 = 1 produces 0x80000000 (-2,147,483,648), which is a sign change, so V = 1. For subtraction, V = 1 when subtracting a negative from a positive gives negative, or subtracting a positive from a negative gives positive.</p>
+
 <h3>Instruction Formats</h3>
 <p>Every ARM instruction is exactly 32 bits wide. The bits are divided into fields:</p>
 
@@ -193,6 +199,12 @@ export const section3 = {
 
 <h4>Immediate Value Encoding</h4>
 <p>ARM encodes immediates as an 8-bit value rotated right by twice a 4-bit rotation amount: <code>immediate = imm8 ROR (2 * rot4)</code>. Not every 32-bit constant can be encoded — only those expressible as a rotated 8-bit value.</p>
+
+<h4>Immediate Encoding — Worked Examples</h4>
+<p><strong>Example 1: Encoding 0xFF.</strong> The value 0xFF fits in 8 bits with no rotation needed. So imm8 = 0xFF, rot4 = 0. The operand2 field is <code>0x0FF</code>. Easy case.</p>
+<p><strong>Example 2: Encoding 0xFF0.</strong> The value 0xFF0 = 0xFF shifted left by 4 bits. A left shift of 4 is equivalent to a right rotation of 28 bits: ROR 28. Since the rotation field stores rot4 where the shift amount = 2 * rot4, we need 2 * rot4 = 28, so rot4 = 14. Thus imm8 = 0xFF, rot4 = 14 (0xE). The operand2 field is <code>0xEFF</code>.</p>
+<p><strong>Example 3: Why 0x101 cannot be encoded.</strong> The value 0x101 in binary is <code>1_0000_0001</code> — it requires 9 bits. No rotation of an 8-bit value can produce a pattern with set bits separated by 7 zero bits. You would need to use two instructions (e.g., <code>MOV R0, #0x100</code> then <code>ORR R0, R0, #1</code>) or <code>LDR R0, =0x101</code> which the assembler places in a literal pool.</p>
+<p><strong>General rule:</strong> A value is encodable as an ARM immediate if and only if all its set bits fit within a contiguous 8-bit window that can be aligned to an even-bit boundary (positions 0, 2, 4, ..., 30).</p>
 
 <h4>Branch Instructions</h4>
 ` },
@@ -282,6 +294,15 @@ SUB R0, R1, #1      @ R0 = R1 - 1
 SUBS R0, R0, #1     @ R0 = R0 - 1, update flags (useful for loops)
 RSB R0, R1, #0      @ R0 = 0 - R1 (Reverse Subtract = negate)` },
         { type: 'text', html: `
+<h4>MUL — Multiply</h4>
+<p>MUL multiplies two registers and stores the lower 32 bits of the result. Note: MUL has a different encoding — the destination comes first, and it does NOT support immediate operands.</p>
+` },
+        { type: 'code', label: 'MUL examples', code: `MUL R0, R1, R2      @ R0 = R1 * R2 (lower 32 bits)
+MULS R0, R1, R2     @ Same, but update N and Z flags
+MLA R0, R1, R2, R3  @ R0 = (R1 * R2) + R3 (multiply-accumulate)` },
+        { type: 'text', html: `
+<p>Important restriction: in early ARM variants, Rd must not be the same register as Rm (the first source operand after the opcode). For example, <code>MUL R1, R1, R2</code> is <strong>unpredictable</strong> — use <code>MUL R1, R2, R1</code> instead.</p>
+
 <h3>Memory Access Instructions</h3>
 <p>ARM is a <strong>load/store architecture</strong>: you cannot perform arithmetic directly on memory. You must first load data into a register, operate on it, then store it back.</p>
 <h4>LDR — Load Register</h4>` },
@@ -354,6 +375,16 @@ sum_loop:
 .data
 array:
     .word 10, 20, 30, 40, 50` },
+        { type: 'text', html: `<h3>Assembler Directives</h3>
+<p>The example above uses several <strong>assembler directives</strong> — instructions to the assembler tool, not to the CPU. They do not produce machine code instructions themselves but control how the assembly is organized:</p>
+<ul>
+<li><strong>.global _start</strong>: Makes the symbol <code>_start</code> visible to the linker, marking it as the program entry point.</li>
+<li><strong>.text</strong>: Marks the beginning of the code section. Instructions placed after <code>.text</code> go into the executable code segment.</li>
+<li><strong>.data</strong>: Marks the beginning of the data section. Variables and constants placed after <code>.data</code> go into the read-write data segment in memory.</li>
+<li><strong>.word 10, 20, 30, 40, 50</strong>: Reserves space and stores 32-bit values directly into memory at the current address. Each value occupies 4 bytes. This is how you define arrays and constants.</li>
+</ul>
+<p>The linker uses <code>.text</code> and <code>.data</code> to place code and data at appropriate memory addresses. On a bare-metal system, <code>.text</code> typically goes to ROM/Flash and <code>.data</code> to RAM.</p>
+` },
         { type: 'text', html: '<h3>Stack Operations</h3><p>ARM uses PUSH and POP (aliases for STMDB and LDMIA with SP):</p>' },
         { type: 'code', label: 'Stack usage in functions', code: `my_function:
     PUSH {R4-R6, LR}    @ Save callee-saved registers and return address
@@ -361,7 +392,6 @@ array:
     POP  {R4-R6, PC}    @ Restore registers and return (pop LR into PC)` },
 
         { type: 'video', id: 'gfmRrPjnEw4', title: 'Assembly Language Programming with ARM — Full Tutorial (freeCodeCamp)' },
-        { type: 'video', id: 'Jz0k3uMpmxA', title: 'You Can Learn ARM Assembly in 15 Minutes' },
 
         { type: 'practice', title: 'Practice Exercises', items: [
           'Write an ARM assembly program that computes the factorial of a number stored in R0 (e.g., 5! = 120). Use a loop with SUBS and BNE.',
@@ -1049,6 +1079,15 @@ endmodule` },
     assign flag_n = result[31];
     assign flag_z = (result == 32'b0);
 endmodule` },
+        { type: 'text', html: `<h3>Why Is Carry Inverted for Subtraction?</h3>
+<p>Look at the SUB and CMP cases in the ALU code above: <code>flag_c = ~sub_result[32]</code>. Why is the carry flag <em>inverted</em> compared to addition?</p>
+<p>ARM defines the C flag for subtraction as "no borrow" — that is, C = 1 when the subtraction <strong>does not</strong> require a borrow. Internally, the CPU computes A - B as A + (~B) + 1 (two's complement negation). When A >= B (unsigned), this addition produces a carry out, and we want C = 1. When A < B, there is no carry out, and we want C = 0. Since the hardware subtraction computes <code>{borrow, result} = A - B</code> where borrow = 1 means A < B, inverting that borrow bit gives us the "no borrow" flag ARM expects. This convention makes unsigned comparisons straightforward: after <code>CMP R0, R1</code>, the condition HI (unsigned greater than) simply checks C=1 and Z=0.</p>
+
+<h3>How the Barrel Shifter Works</h3>
+<p>ARM's barrel shifter is a combinational circuit that can shift or rotate the second ALU operand by any amount from 0 to 31 bits in a single cycle, at zero additional cost. It sits between the operand2 field and the ALU's B input.</p>
+<p>A barrel shifter is built from layers of multiplexers. A 32-bit barrel shifter uses 5 stages (since 2^5 = 32): stage 0 optionally shifts by 1, stage 1 by 2, stage 2 by 4, stage 3 by 8, and stage 4 by 16. Each stage is controlled by one bit of the shift amount. For example, shifting by 5 (binary 00101) activates stages 0 and 2, shifting by 1 then by 4. This gives any shift amount with only multiplexer delay, not sequential shifts.</p>
+<p>ARM supports four shift types: <strong>LSL</strong> (logical shift left, fills with zeros), <strong>LSR</strong> (logical shift right, fills with zeros), <strong>ASR</strong> (arithmetic shift right, fills with the sign bit for signed division), and <strong>ROR</strong> (rotate right, bits that fall off re-enter from the top). The shift amount can be a 5-bit immediate or the bottom byte of a register.</p>
+` },
         { type: 'text', html: '<h3>CPSR Register</h3><p>Flags are stored in the CPSR and only updated when the S bit is set:</p>' },
         { type: 'code', label: 'cpsr_register.v', code: `module cpsr_register (
     input  wire clk, reset, update_flags,
@@ -1233,6 +1272,45 @@ endmodule` },
     assign branch_target = pc + sign_ext_offset + 32'd8;
 endmodule` },
 
+        { type: 'text', html: `<h3>Tracing an ADD Instruction Through the Datapath</h3>
+<p>Let us trace <code>ADD R0, R1, R2</code> (encoded as 0xE0810002) step by step through the complete single-cycle CPU:</p>
+<ol>
+<li><strong>Fetch:</strong> The program counter (PC) holds the current address, say 0x00000008. This address is sent to instruction memory, which returns the 32-bit word 0xE0810002. Simultaneously, the PC increments to 0x0000000C for the next cycle.</li>
+<li><strong>Decode:</strong> The instruction decoder splits the word into fields: cond = 0xE (AL, always execute), class = 0b00 (data processing), I = 0 (register operand), opcode = 0b0100 (ADD), S = 0 (don't update flags), Rn = 1, Rd = 0, Rm = 2. The condition evaluator checks cond = AL against the CPSR flags and outputs cond_met = 1 (always true). Since I = 0, imm_select is 0, so the ALU will use a register value, not an immediate.</li>
+<li><strong>Register Read:</strong> The register file receives read_addr1 = 1 (Rn) and read_addr2 = 2 (Rm). It outputs reg_data1 = contents of R1, reg_data2 = contents of R2. Since imm_select = 0, the mux passes reg_data2 as alu_operand_b.</li>
+<li><strong>ALU Execute:</strong> The ALU receives operand_a = R1's value, operand_b = R2's value, and alu_op = 0100 (ADD). It computes the sum and outputs the result. Since S = 0, update_flags is low, so the CPSR register ignores the ALU's flag outputs.</li>
+<li><strong>Write-Back:</strong> The control unit asserts reg_write (it is a data processing instruction and the condition was met). mem_to_reg = 0 (not a load), link_write = 0 (not BL), so the write-back mux selects alu_result. The register file writes alu_result into R0 (the Rd field) on the next rising clock edge.</li>
+</ol>
+
+<h3>Tracing an LDR Instruction Through the Datapath</h3>
+<p>Now trace <code>LDR R3, [R1, #8]</code> — load the word at address (R1 + 8) into R3:</p>
+<ol>
+<li><strong>Fetch:</strong> PC sends its address to instruction memory, which returns the encoded LDR instruction. PC increments by 4.</li>
+<li><strong>Decode:</strong> The decoder identifies class = 0b01 (load/store), the L bit (bit 20) = 1 indicating load (not store), Rn = 1 (base register), Rd = 3 (destination), and the 12-bit offset = 8. The control unit sets is_load = 1, causing mem_read = 1, mem_to_reg = 1 (result comes from memory, not ALU), and reg_write = 1 (we are writing to Rd).</li>
+<li><strong>Register Read:</strong> The register file outputs R1's value on read_data1. The immediate offset 8 is sign-extended and selected by imm_select.</li>
+<li><strong>ALU Execute:</strong> The ALU receives operand_a = R1 value and operand_b = 8. Even though this is a load instruction, the ALU is repurposed to compute the effective address: it performs ADD, producing the address R1 + 8. This is why the ALU is used for <em>every</em> instruction — for loads/stores it calculates the memory address.</li>
+<li><strong>Memory Access:</strong> The ALU result (R1 + 8) is sent to data_memory as the address. With mem_read = 1, data memory outputs the 32-bit word stored at that address.</li>
+<li><strong>Write-Back:</strong> Since mem_to_reg = 1, the write-back mux selects mem_read_data (not alu_result). This value is written into R3 on the next clock edge.</li>
+</ol>
+` },
+        { type: 'table', headers: ['Signal', 'Data Processing (ADD)', 'Load (LDR)', 'Store (STR)', 'Branch (B)', 'Branch-Link (BL)'],
+          rows: [
+            ['reg_write', '1', '1', '0', '0', '1 (writes LR)'],
+            ['mem_read', '0', '1', '0', '0', '0'],
+            ['mem_write', '0', '0', '1', '0', '0'],
+            ['mem_to_reg', '0', '1', 'X', 'X', '0'],
+            ['branch_taken', '0', '0', '0', '1', '1'],
+            ['link_write', '0', '0', '0', '0', '1'],
+            ['update_flags', 'S bit', '0', '0', '0', '0'],
+            ['ALU operation', 'per opcode', 'ADD (addr calc)', 'ADD (addr calc)', 'unused', 'unused'],
+            ['write_back_data src', 'alu_result', 'mem_read_data', 'N/A', 'N/A', 'PC + 4'],
+          ]
+        },
+        { type: 'text', html: `<h3>The Critical Path and Single-Cycle Limitations</h3>
+<p>In a single-cycle CPU, every instruction must complete within one clock cycle. The <strong>critical path</strong> is the longest combinational delay through the circuit, and it determines the maximum clock frequency.</p>
+<p>The worst-case critical path runs through a load instruction: PC register propagation &rarr; instruction memory read &rarr; instruction decode &rarr; register file read &rarr; ALU address computation &rarr; data memory read &rarr; write-back mux &rarr; register file write setup. Every one of these stages adds delay, and the clock period must accommodate the sum of all of them.</p>
+<p>This is why a single-cycle design is fundamentally slow. A data processing instruction like ADD does not use the memory read stage at all, yet it must wait for the same long clock period dictated by LDR. If the instruction memory takes 2ns, the register file 1ns, the ALU 2ns, and data memory 2ns, the critical path might be ~8-10ns, limiting you to roughly 100-125 MHz. By splitting into pipeline stages (next lesson), each stage handles only its own delay, and the clock period shrinks to match the slowest individual stage, not the sum of all stages.</p>
+` },
         { type: 'info', variant: 'success', title: 'Milestone: A Complete CPU',
           html: '<p>You now have a complete single-cycle ARM CPU in Verilog. It can execute data processing instructions (ADD, SUB, MOV, CMP, etc.), load/store (LDR, STR), and branches (B, BL). Every instruction completes in one clock cycle.</p>' },
 
@@ -1279,7 +1357,30 @@ endmodule` },
         },
         { type: 'text', html: `
 <p>Without pipelining, each instruction takes the full time of all 5 stages. With pipelining, once the pipeline is full, one instruction completes every clock cycle — even though each instruction still takes 5 cycles start-to-finish.</p>
+` },
+        { type: 'diagram', content: `Pipeline Timing Diagram — 5 instructions overlapping:
 
+Cycle:       1     2     3     4     5     6     7     8     9
+          +-----+-----+-----+-----+-----+
+Instr 1:  | IF  | ID  | EX  | MEM | WB  |
+          +-----+-----+-----+-----+-----+
+                +-----+-----+-----+-----+-----+
+Instr 2:        | IF  | ID  | EX  | MEM | WB  |
+                +-----+-----+-----+-----+-----+
+                      +-----+-----+-----+-----+-----+
+Instr 3:              | IF  | ID  | EX  | MEM | WB  |
+                      +-----+-----+-----+-----+-----+
+                            +-----+-----+-----+-----+-----+
+Instr 4:                    | IF  | ID  | EX  | MEM | WB  |
+                            +-----+-----+-----+-----+-----+
+                                  +-----+-----+-----+-----+-----+
+Instr 5:                          | IF  | ID  | EX  | MEM | WB  |
+                                  +-----+-----+-----+-----+-----+
+
+Without pipelining: 5 instructions x 5 stages = 25 cycles
+With pipelining:    5 + (5-1) = 9 cycles (after filling, 1 completion/cycle)
+Speedup approaches 5x (the number of stages) as program length grows.` },
+        { type: 'text', html: `
 <h3>Pipeline Registers</h3>
 <p>Between each stage, pipeline registers hold intermediate results:</p>
 ` },
@@ -1326,11 +1427,26 @@ SUB R4, R1, R5    @ Reads R1 in ID stage (cycle 3) — R1 not written yet!` },
     end
 endmodule` },
         { type: 'text', html: `
+<h4>Load-Use Hazards — Why Forwarding Alone Is Insufficient</h4>
+<p>Consider this sequence:</p>
+` },
+        { type: 'code', label: 'Load-use hazard example', code: `LDR R1, [R0]      @ R1 gets its value from memory in MEM stage (cycle 4)
+ADD R2, R1, R3    @ Reads R1 in EX stage (cycle 3) — data not available yet!` },
+        { type: 'text', html: `
+<p>With a normal data hazard (e.g., ADD followed by SUB), forwarding routes the result from the EX/MEM pipeline register back to the EX stage inputs. This works because the ALU result is available at the end of the EX stage.</p>
+<p>But a load instruction does not produce its result until the end of the <strong>MEM</strong> stage — one stage later. When the dependent ADD reaches EX, the LDR is only in MEM and has not yet read from data memory. There is no value to forward yet. This is called a <strong>load-use hazard</strong>.</p>
+<p>The solution requires a mandatory <strong>one-cycle stall</strong> (also called a "bubble"): the hazard detection unit detects that the instruction in EX/MEM is a load whose Rd matches a source register of the instruction in ID/EX. It freezes the IF/ID and ID/EX pipeline registers for one cycle and inserts a NOP into EX/MEM. After the stall, the load data is available in MEM/WB and can be forwarded normally. Compilers can help by reordering instructions to fill the "load delay slot" with an independent instruction.</p>
+
 <h4>2. Control Hazards (Branch Hazards)</h4>
 <p>When a branch is taken, instructions already fetched are wrong and must be <strong>flushed</strong> (replaced with NOPs). More sophisticated CPUs use <strong>branch prediction</strong> to guess whether a branch will be taken.</p>
 
 <h4>3. Structural Hazards</h4>
 <p>Two stages need the same resource (e.g., one memory port shared between IF and MEM). ARM avoids this with separate instruction and data memories (Harvard architecture).</p>
+
+<h3>Branch Resolution and Flush in Detail</h3>
+<p>In our 5-stage pipeline, a branch instruction (B, BNE, etc.) is decoded in the ID stage, but the branch condition is not evaluated until the EX stage, where the condition evaluator checks the CPSR flags. By the time EX determines "this branch is taken," two younger instructions have already been fetched into the pipeline (one in IF, one in ID).</p>
+<p>The flush mechanism works as follows: when the EX stage signals <code>branch_taken = 1</code>, the pipeline asserts the <code>flush</code> signal on the IF/ID and ID/EX pipeline registers. On the next clock edge, those registers load NOP instructions (0xE1A00000, which is <code>MOV R0, R0</code> — a harmless no-op). Simultaneously, the PC loads the branch target address, so the correct instruction is fetched on the next cycle. This costs 2 wasted cycles per taken branch — the "branch penalty."</p>
+<p>To reduce this penalty, more advanced designs move branch resolution earlier to the ID stage (reducing the penalty to 1 cycle), use <strong>branch prediction</strong> (guess the branch outcome before it is known), or use ARM's conditional execution to avoid branches entirely on short sequences.</p>
 
 <h3>Performance Impact</h3>
 ` },
@@ -1437,8 +1553,46 @@ endmodule` },
 <li>Bootloader jumps to the start of the loaded program</li>
 </ol>
 
-<h3>UART Receiver</h3>
-<p>UART (Universal Asynchronous Receiver-Transmitter) sends data one bit at a time with a start bit, 8 data bits, and a stop bit:</p>
+<h3>UART Fundamentals</h3>
+<p>UART (Universal Asynchronous Receiver-Transmitter) is the simplest serial communication protocol. It uses a single wire for each direction (TX for transmit, RX for receive) with no clock wire — hence "asynchronous." Both sides must agree on the <strong>baud rate</strong> (bits per second) in advance.</p>
+<p>The line idles <strong>high</strong> (logic 1). To send a byte, the transmitter:</p>
+<ol>
+<li>Pulls the line low for one bit period — this is the <strong>start bit</strong>, alerting the receiver that data follows.</li>
+<li>Sends 8 data bits, least significant bit first.</li>
+<li>Returns the line high for one bit period — the <strong>stop bit</strong>, guaranteeing the line is high before the next start bit.</li>
+</ol>
+<p>At 115200 baud, each bit lasts 1/115200 = ~8.68 microseconds. One full byte frame (1 start + 8 data + 1 stop = 10 bits) takes ~86.8 microseconds.</p>
+` },
+        { type: 'diagram', content: `UART Byte Transmission (sending 0x55 = 01010101):
+
+        idle                                               idle
+ ____          ___     ___     ___     ___          ________
+     |        |   |   |   |   |   |   |   |        |
+     |________|   |___|   |___|   |___|   |________|
+
+      start  D0  D1  D2  D3  D4  D5  D6  D7  stop
+      bit    1    0   1    0   1   0   1    0  bit
+
+     |<- 8.68us ->| (one bit period at 115200 baud)
+
+The receiver samples each bit at its midpoint for maximum
+noise margin. The start bit's falling edge triggers timing.` },
+        { type: 'text', html: `
+<p>This protocol is covered in depth in Section 2, Lesson 3 (UART from scratch), where you build both transmitter and receiver in Verilog. Here we focus on using the receiver module inside the bootloader.</p>
+
+<h3>Deriving CLKS_PER_BIT</h3>
+<p>The UART receiver runs on the FPGA system clock, which is much faster than the baud rate. To sample each UART bit at the right time, we need to know how many clock cycles correspond to one bit period:</p>
+<p><code>CLKS_PER_BIT = System Clock Frequency / Baud Rate</code></p>
+<p>For a 50 MHz system clock and 115200 baud: <code>CLKS_PER_BIT = 50,000,000 / 115,200 = 434.03 &asymp; 434</code></p>
+<p>The receiver counts 434 clock cycles per bit. To sample at the midpoint of each bit (for maximum noise margin), it waits CLKS_PER_BIT/2 = 217 clocks after detecting the start bit's falling edge, confirms the line is still low (valid start bit), then waits full CLKS_PER_BIT intervals for each of the 8 data bits. The rounding error of 0.03 clocks per bit accumulates to only 0.3 clocks over a 10-bit frame — well within tolerance.</p>
+<p>Common configurations: 100 MHz / 115200 = 868. 25 MHz / 9600 = 2604. If your system clock changes, just recalculate this parameter.</p>
+
+<h3>Endianness and Byte Ordering</h3>
+<p>When the bootloader receives bytes over UART and assembles them into 32-bit words, <strong>byte ordering matters</strong>. ARM processors can operate in either <strong>little-endian</strong> (least significant byte at lowest address) or <strong>big-endian</strong> (most significant byte at lowest address) mode. Most ARM systems default to little-endian.</p>
+<p>In our bootloader, bytes arrive over UART in order: byte 0, byte 1, byte 2, byte 3. In little-endian format, byte 0 is the least significant byte. Look at the RECV state in the bootloader code: <code>word_buf[7:0] &lt;= rx_byte</code> for the first byte, <code>word_buf[15:8] &lt;= rx_byte</code> for the second, and so on. The final word is assembled as <code>{rx_byte, word_buf[23:0]}</code>, placing the last byte received in the most significant position — this matches little-endian byte order where the host sends the LSB first.</p>
+<p>If the host and FPGA disagree on byte order, instructions will be garbled. For example, the instruction <code>0xE3A00005</code> (MOV R0, #5) stored little-endian in memory is bytes <code>05 00 A0 E3</code>. If the bootloader assembled them in big-endian order instead, the CPU would see <code>0x0500A0E3</code> — a completely different (and likely invalid) instruction. The upload script and bootloader must use the same convention.</p>
+
+<h3>UART Receiver Module</h3>
 ` },
         { type: 'code', label: 'uart_rx.v — Serial receiver', code: `module uart_rx (
     input  wire       clk,

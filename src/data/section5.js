@@ -132,7 +132,88 @@ process &mdash; wasteful when most entries are invalid. The solution is a
 
 <p>This is exactly how x86 two-level paging works, and ARM uses a similar
 scheme (TTBR0/TTBR1 registers).</p>
+
+<h3>Concrete Walkthrough: Translating 0x00002ABC</h3>
+
+<p>Assume 4 KB pages (2<sup>12</sup> = 4096 bytes), so the offset is 12 bits
+and the VPN is the upper 20 bits.</p>
+
+<pre><code>
+Virtual address: 0x00002ABC
+
+Step 1 -- Split the address:
+  Binary: 0000 0000 0000 0000 0010 1010 1011 1100
+  VPN    = upper 20 bits = 0x00002  (page 2)
+  Offset = lower 12 bits = 0xABC   (byte 2748 within the page)
+
+Step 2 -- Page table lookup:
+  page_table[2] = { frame = 8, valid = 1, rw = 1 }
+  PFN = 8
+
+Step 3 -- Form physical address:
+  Physical address = (PFN &lt;&lt; 12) | Offset
+                   = (0x8 &lt;&lt; 12) | 0xABC
+                   = 0x00008000  | 0x00000ABC
+                   = 0x00008ABC
+</code></pre>
+
+<p>So virtual <code>0x00002ABC</code> maps to physical <code>0x00008ABC</code>.
+The VPN (2) selects the page table entry, and the offset (0xABC) passes
+through unchanged.</p>
           `,
+        },
+        {
+          type: "code",
+          label: "Simulated page table lookup in C",
+          code: `#include <stdio.h>
+#include <stdint.h>
+
+#define PAGE_SIZE   4096    /* 4 KB = 2^12 */
+#define PAGE_SHIFT  12
+#define NUM_PAGES   4
+
+/* Each page table entry stores a frame number and a valid bit. */
+typedef struct {
+    uint32_t frame;   /* physical frame number */
+    int      valid;   /* 1 = mapped, 0 = not present */
+} pte_t;
+
+/* A tiny page table: VPN 0-3 */
+pte_t page_table[NUM_PAGES] = {
+    { .frame = 5, .valid = 1 },   /* VPN 0 -> frame 5 */
+    { .frame = 3, .valid = 1 },   /* VPN 1 -> frame 3 */
+    { .frame = 8, .valid = 1 },   /* VPN 2 -> frame 8 */
+    { .frame = 0, .valid = 0 },   /* VPN 3 -> not mapped */
+};
+
+int translate(uint32_t virtual_addr, uint32_t *physical_addr) {
+    uint32_t vpn    = virtual_addr >> PAGE_SHIFT;
+    uint32_t offset = virtual_addr & (PAGE_SIZE - 1);
+
+    if (vpn >= NUM_PAGES || !page_table[vpn].valid) {
+        return -1;  /* PAGE FAULT */
+    }
+    *physical_addr = (page_table[vpn].frame << PAGE_SHIFT) | offset;
+    return 0;
+}
+
+int main(void) {
+    uint32_t tests[] = { 0x00000ABC, 0x00001234, 0x00002ABC, 0x00003010 };
+    for (int i = 0; i < 4; i++) {
+        uint32_t pa;
+        if (translate(tests[i], &pa) == 0)
+            printf("0x%08X -> 0x%08X\\n", tests[i], pa);
+        else
+            printf("0x%08X -> PAGE FAULT\\n", tests[i]);
+    }
+    return 0;
+}
+/* Output:
+ * 0x00000ABC -> 0x00005ABC
+ * 0x00001234 -> 0x00003234
+ * 0x00002ABC -> 0x00008ABC
+ * 0x00003010 -> PAGE FAULT
+ */`,
         },
         {
           type: "video",
@@ -449,6 +530,38 @@ instantaneous even for large processes.</p>
           ],
         },
         {
+          type: "text",
+          html: `
+<h3>The Clock (Second-Chance) Page Replacement Algorithm</h3>
+
+<p>The practice exercise below asks you to implement the <strong>Clock</strong>
+algorithm, so here is how it works. Clock is an approximation of LRU that
+avoids scanning the entire page list on every replacement.</p>
+
+<ol>
+  <li>All frames are arranged in a circular buffer (like a clock face).
+      A <strong>clock hand</strong> points to the current position.</li>
+  <li>Each frame has a <strong>reference bit</strong> (also called a
+      &ldquo;use bit&rdquo;). The MMU sets this bit to 1 whenever the page
+      is accessed.</li>
+  <li>When a page fault occurs and a victim must be evicted:
+    <ul>
+      <li>Inspect the frame at the clock hand.</li>
+      <li>If its reference bit is <strong>1</strong>, give it a &ldquo;second
+          chance&rdquo;: clear the bit to 0 and advance the hand.</li>
+      <li>If its reference bit is <strong>0</strong>, evict this page &mdash;
+          it has not been accessed since its last second chance.</li>
+    </ul>
+  </li>
+  <li>In the worst case the hand sweeps all the way around, clearing every
+      bit, and evicts the page where it started (degenerating to FIFO).</li>
+</ol>
+
+<p>Clock is used in real operating systems (including variants in Linux)
+because it is O(1) amortized and requires only a single bit per frame.</p>
+          `,
+        },
+        {
           type: "practice",
           title: "Practice Exercises -- Page Faults",
           items: [
@@ -699,7 +812,103 @@ are:</p>
   <tr><td>Round-Robin</td><td>FIFO with time quantum</td><td>Fair, no starvation</td><td>Higher avg turnaround than SJF</td></tr>
   <tr><td>MLFQ</td><td>Multi-Level Feedback Queue</td><td>Adapts to behavior</td><td>Complex</td></tr>
 </table>
+
+<h3>Key Scheduling Metrics</h3>
+
+<ul>
+  <li><strong>Turnaround time</strong> = Completion time &minus; Arrival time.
+      Total time from when a process arrives to when it finishes. Includes
+      both waiting and execution.</li>
+  <li><strong>Waiting time</strong> = Turnaround time &minus; Burst time.
+      Time spent in the ready queue, not executing.</li>
+  <li><strong>Response time</strong> = First-run time &minus; Arrival time.
+      Time from arrival until the process first gets the CPU. Critical for
+      interactive systems.</li>
+</ul>
+
+<h3>Worked Example: Round-Robin with Quantum = 3</h3>
+
+<p>Three processes arrive at time 0:</p>
+
+<table>
+  <tr><th>Process</th><th>Arrival</th><th>Burst</th></tr>
+  <tr><td>P1</td><td>0</td><td>5</td></tr>
+  <tr><td>P2</td><td>0</td><td>3</td></tr>
+  <tr><td>P3</td><td>0</td><td>7</td></tr>
+</table>
+
+<p><strong>Gantt chart</strong> (time quantum = 3):</p>
+<pre><code>
+Time:  0  1  2  3  4  5  6  7  8  9 10 11 12 13 14
+      |---P1---|---P2---|---P3---|--P1--|---P3----|
+       P1(3)    P2(3)    P3(3)   P1(2)   P3(4)
+
+t=0:  P1 runs for 3 (remaining: 2). Queue: [P2, P3]
+t=3:  P2 runs for 3 (remaining: 0). Done! Queue: [P3, P1]
+t=6:  P3 runs for 3 (remaining: 4). Queue: [P1, P3]
+t=9:  P1 runs for 2 (remaining: 0). Done! Queue: [P3]
+t=11: P3 runs for 4 (remaining: 0). Done!
+</code></pre>
+
+<table>
+  <tr><th>Process</th><th>Completion</th><th>Turnaround</th><th>Waiting</th><th>Response</th></tr>
+  <tr><td>P1</td><td>11</td><td>11 &minus; 0 = 11</td><td>11 &minus; 5 = 6</td><td>0 &minus; 0 = 0</td></tr>
+  <tr><td>P2</td><td>6</td><td>6 &minus; 0 = 6</td><td>6 &minus; 3 = 3</td><td>3 &minus; 0 = 3</td></tr>
+  <tr><td>P3</td><td>15</td><td>15 &minus; 0 = 15</td><td>15 &minus; 7 = 8</td><td>6 &minus; 0 = 6</td></tr>
+</table>
+
+<p>Averages: turnaround = (11+6+15)/3 = 10.67, waiting = (6+3+8)/3 = 5.67,
+response = (0+3+6)/3 = 3.0.</p>
           `,
+        },
+        {
+          type: "code",
+          label: "Round-robin scheduler pseudocode",
+          code: `// Round-Robin Scheduler (pseudocode in C-like syntax)
+
+struct process {
+    int pid;
+    int burst_remaining;
+    int arrival_time;
+};
+
+// ready_queue is a FIFO queue of process pointers
+Queue ready_queue;
+int time_quantum = 3;
+int clock = 0;
+
+void schedule(struct process procs[], int n) {
+    // Enqueue all processes that have arrived at time 0
+    for (int i = 0; i < n; i++) {
+        if (procs[i].arrival_time <= clock)
+            enqueue(&ready_queue, &procs[i]);
+    }
+
+    while (!queue_empty(&ready_queue)) {
+        struct process *p = dequeue(&ready_queue);
+
+        // Run for min(quantum, remaining burst)
+        int run_time = min(time_quantum, p->burst_remaining);
+        printf("t=%d: P%d runs for %d\\n", clock, p->pid, run_time);
+        clock += run_time;
+        p->burst_remaining -= run_time;
+
+        // Enqueue any newly arrived processes
+        for (int i = 0; i < n; i++) {
+            if (procs[i].arrival_time > clock - run_time &&
+                procs[i].arrival_time <= clock &&
+                procs[i].burst_remaining > 0)
+                enqueue(&ready_queue, &procs[i]);
+        }
+
+        // Re-enqueue current process if not finished
+        if (p->burst_remaining > 0) {
+            enqueue(&ready_queue, p);
+        } else {
+            printf("P%d completed at t=%d\\n", p->pid, clock);
+        }
+    }
+}`,
         },
         {
           type: "video",
@@ -993,7 +1202,171 @@ it. A system flooded with zombies can run out of PIDs.</p>
 <p>A process can install a custom <strong>signal handler</strong> function for
 most signals using <code>signal()</code> or <code>sigaction()</code>. SIGKILL
 and SIGSTOP cannot be caught or ignored.</p>
+
+<h3>Sessions and Terminal Control</h3>
+
+<p>A <strong>session</strong> is a collection of one or more process groups
+tied to a single controlling terminal. The function <code>setsid()</code>
+creates a new session:</p>
+
+<ul>
+  <li>The calling process becomes the <strong>session leader</strong> and the
+      leader of a new process group.</li>
+  <li>The process has <strong>no controlling terminal</strong> (it is
+      detached).</li>
+  <li>This is the key step in creating a <strong>daemon</strong>: fork, have
+      the parent exit, and call <code>setsid()</code> in the child so it is
+      no longer associated with the original terminal.</li>
+</ul>
+
+<p>The controlling terminal sends signals to the foreground process group.
+When the terminal hangs up, SIGHUP is sent to the session leader. This is
+why background processes started from a shell die when you close the
+terminal &mdash; unless they have called <code>setsid()</code> or are run
+under <code>nohup</code>.</p>
+
+<h3>Sending Signals with kill()</h3>
+
+<p><code>int kill(pid_t pid, int sig)</code> sends signal <code>sig</code> to
+process <code>pid</code>. Despite its name, it can send <em>any</em> signal,
+not just lethal ones. Special pid values:</p>
+<ul>
+  <li><code>pid &gt; 0</code> &mdash; send to that specific process.</li>
+  <li><code>pid == 0</code> &mdash; send to every process in the caller's
+      process group.</li>
+  <li><code>pid == -1</code> &mdash; send to every process the caller has
+      permission to signal.</li>
+  <li><code>pid &lt; -1</code> &mdash; send to every process in process
+      group <code>|pid|</code>.</li>
+</ul>
+
+<h3>Reaping Children: SIGCHLD + waitpid Pattern</h3>
+
+<p>When a child exits, the kernel sends <strong>SIGCHLD</strong> to the
+parent. The default action is to ignore it, which leaves zombies. The
+correct pattern for servers and shells that spawn many children is:</p>
+
+<ol>
+  <li>Install a SIGCHLD handler using <code>sigaction()</code>.</li>
+  <li>In the handler, call <code>waitpid(-1, &amp;status, WNOHANG)</code>
+      in a loop. <code>-1</code> means &ldquo;any child,&rdquo;
+      <code>WNOHANG</code> means &ldquo;do not block if no child has
+      exited yet.&rdquo;</li>
+  <li>Loop until <code>waitpid</code> returns 0 (no more exited children)
+      or -1 (error). This is essential because multiple children may exit
+      before the handler runs &mdash; signals are not queued.</li>
+</ol>
           `,
+        },
+        {
+          type: "code",
+          label: "sigaction() with SIGCHLD handler for reaping children",
+          code: `#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <errno.h>
+
+/* SIGCHLD handler: reap all exited children without blocking */
+void sigchld_handler(int sig) {
+    (void)sig;
+    int saved_errno = errno;  /* save errno -- handler must not clobber it */
+    pid_t pid;
+    int status;
+
+    /* Loop: multiple children may have exited (signals coalesce) */
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        if (WIFEXITED(status))
+            printf("  [reaped child %d, exit=%d]\\n", pid, WEXITSTATUS(status));
+        else if (WIFSIGNALED(status))
+            printf("  [reaped child %d, killed by signal %d]\\n", pid, WTERMSIG(status));
+    }
+    errno = saved_errno;
+}
+
+int main(void) {
+    /* Install SIGCHLD handler using sigaction (preferred over signal()) */
+    struct sigaction sa;
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    /*  SA_RESTART  -- restart interrupted system calls automatically
+     *  SA_NOCLDSTOP -- only notify on termination, not on stop/continue */
+    if (sigaction(SIGCHLD, &sa, NULL) == -1) {
+        perror("sigaction");
+        exit(1);
+    }
+
+    /* Spawn 3 children */
+    for (int i = 0; i < 3; i++) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            printf("Child %d (PID %d) running\\n", i, getpid());
+            sleep(i + 1);  /* each child sleeps a different duration */
+            _exit(i);
+        }
+        printf("Parent spawned child PID %d\\n", pid);
+    }
+
+    /* Send SIGTERM to a specific child using kill() */
+    /* kill(some_pid, SIGTERM); */
+
+    /* Parent does other work; children are reaped asynchronously */
+    printf("Parent doing work... children will be reaped by SIGCHLD handler\\n");
+    sleep(5);
+    printf("Parent exiting\\n");
+    return 0;
+}`,
+        },
+        {
+          type: "code",
+          label: "Sending signals with kill() and creating a daemon with setsid()",
+          code: `#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <signal.h>
+
+/* --- Example 1: Sending signals with kill() --- */
+void send_signal_example(void) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Child: sleep and wait to be signaled */
+        printf("Child PID %d waiting...\\n", getpid());
+        pause();  /* blocks until a signal is received */
+        _exit(0);
+    }
+    sleep(1);
+    printf("Parent sending SIGTERM to child %d\\n", pid);
+    kill(pid, SIGTERM);  /* send SIGTERM to child */
+    waitpid(pid, NULL, 0);
+    printf("Child terminated\\n");
+}
+
+/* --- Example 2: Creating a daemon with setsid() --- */
+void daemonize(void) {
+    pid_t pid = fork();
+    if (pid < 0) { perror("fork"); exit(1); }
+    if (pid > 0) _exit(0);  /* parent exits */
+
+    /* Child continues: create new session */
+    if (setsid() < 0) { perror("setsid"); exit(1); }
+    /*  Now this process is:
+     *    - session leader of a new session
+     *    - process group leader of a new group
+     *    - has no controlling terminal            */
+
+    /* Close inherited file descriptors */
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDERR_FILENO);
+
+    /* Daemon work loop */
+    while (1) {
+        /* ... do background work, log to a file ... */
+        sleep(30);
+    }
+}`,
         },
         {
           type: "video",
@@ -1244,7 +1617,120 @@ interrupt.</p>
       May power down hardware.</li>
   <li><strong>ISR:</strong> Handles hardware interrupts from the device.</li>
 </ol>
+
+<h3>MMIO Access with Volatile Pointers</h3>
+
+<p>In bare-metal and kernel code, hardware registers are accessed by casting
+their physical addresses to <code>volatile</code> pointers. The
+<code>volatile</code> keyword tells the compiler that the value at this
+address can change at any time (because the hardware can modify it), so it
+must not optimize away reads or writes:</p>
+
+<pre><code>/* Define a UART data register at its MMIO address */
+#define UART0_DR  (*(volatile uint32_t *)0x09000000)
+
+/* Write a character */
+UART0_DR = 'A';
+
+/* Read a character */
+char c = (char)UART0_DR;
+</code></pre>
+
+<p>Never access device registers through normal (non-volatile) pointers.
+The compiler may cache the value in a CPU register and never re-read the
+hardware, or it may eliminate a write it considers &ldquo;dead.&rdquo;</p>
+
+<h3>PL011 UART Register Map</h3>
+
+<p>The ARM PL011 is the UART used on QEMU's <code>virt</code> machine
+(base address <code>0x09000000</code>) and on the Raspberry Pi. Its key
+registers:</p>
+
+<table>
+  <tr><th>Offset</th><th>Name</th><th>Description</th></tr>
+  <tr><td>0x000</td><td>DR</td><td>Data Register &mdash; write to transmit, read to receive</td></tr>
+  <tr><td>0x018</td><td>FR</td><td>Flag Register &mdash; status bits (TX full, RX empty, busy)</td></tr>
+  <tr><td>0x024</td><td>IBRD</td><td>Integer Baud Rate Divisor</td></tr>
+  <tr><td>0x028</td><td>FBRD</td><td>Fractional Baud Rate Divisor</td></tr>
+  <tr><td>0x02C</td><td>LCRH</td><td>Line Control Register &mdash; word length, parity, FIFO enable</td></tr>
+  <tr><td>0x030</td><td>CR</td><td>Control Register &mdash; UART enable, TX enable, RX enable</td></tr>
+</table>
+
+<p>The Flag Register (FR) has two critical bits: <strong>TXFF</strong>
+(bit 5, transmit FIFO full) and <strong>RXFE</strong> (bit 4, receive
+FIFO empty). A driver polls these before writing or reading.</p>
+
+<h3>What is ioctl?</h3>
+
+<p><code>int ioctl(int fd, unsigned long request, ...)</code> is a catch-all
+system call for device-specific operations that do not fit the
+read/write model. For example, setting the baud rate of a serial port,
+ejecting a CD-ROM, or querying the screen resolution of a framebuffer.
+The <code>request</code> parameter is a device-specific command number,
+and the optional third argument is typically a pointer to a struct with
+command-specific data. Each driver defines its own set of ioctl
+commands.</p>
           `,
+        },
+        {
+          type: "code",
+          label: "Minimal PL011 UART driver for QEMU ARM virt",
+          code: `#include <stdint.h>
+
+/* ---- PL011 UART registers (QEMU virt: base 0x09000000) ---- */
+#define UART0_BASE  0x09000000
+
+#define UART0_DR    (*(volatile uint32_t *)(UART0_BASE + 0x000)) /* Data       */
+#define UART0_FR    (*(volatile uint32_t *)(UART0_BASE + 0x018)) /* Flags      */
+#define UART0_IBRD  (*(volatile uint32_t *)(UART0_BASE + 0x024)) /* Int baud   */
+#define UART0_FBRD  (*(volatile uint32_t *)(UART0_BASE + 0x028)) /* Frac baud  */
+#define UART0_LCRH  (*(volatile uint32_t *)(UART0_BASE + 0x02C)) /* Line ctrl  */
+#define UART0_CR    (*(volatile uint32_t *)(UART0_BASE + 0x030)) /* Control    */
+
+/* Flag register bits */
+#define FR_TXFF  (1 << 5)   /* Transmit FIFO full  */
+#define FR_RXFE  (1 << 4)   /* Receive FIFO empty  */
+
+void uart_init(void) {
+    UART0_CR = 0;              /* Disable UART               */
+    UART0_IBRD = 1;            /* Baud = clock / (16 * 1) -- */
+    UART0_FBRD = 40;           /* exact rate depends on clock */
+    UART0_LCRH = (3 << 5);    /* 8-bit word, FIFO disabled   */
+    UART0_CR = (1 << 0)       /* UART enable                 */
+             | (1 << 8)       /* TX enable                   */
+             | (1 << 9);      /* RX enable                   */
+}
+
+void uart_putc(char c) {
+    /* Wait until transmit FIFO is not full */
+    while (UART0_FR & FR_TXFF)
+        ;  /* spin */
+    UART0_DR = c;
+}
+
+char uart_getc(void) {
+    /* Wait until receive FIFO is not empty */
+    while (UART0_FR & FR_RXFE)
+        ;  /* spin */
+    return (char)UART0_DR;
+}
+
+void uart_puts(const char *s) {
+    while (*s) {
+        if (*s == '\\n') uart_putc('\\r');  /* CR before LF */
+        uart_putc(*s++);
+    }
+}
+
+/* Entry point (called from startup assembly) */
+void main(void) {
+    uart_init();
+    uart_puts("Hello from bare-metal UART!\\n");
+    while (1) {
+        char c = uart_getc();
+        uart_putc(c);  /* echo back */
+    }
+}`,
         },
         {
           type: "video",
@@ -1528,7 +2014,83 @@ Max volume size ~2 TB.</p>
 <p>The type is determined by the <em>number of clusters</em>, not by a format
 flag: fewer than 4,085 clusters is FAT12, fewer than 65,525 is FAT16,
 otherwise FAT32.</p>
+
+<h3>Calculating the Data Region Start</h3>
+
+<p>To locate the data region you need values from the BPB (BIOS Parameter
+Block in sector 0):</p>
+
+<pre><code>
+root_dir_sectors = ((bpb.root_entry_count * 32) + (bpb.bytes_per_sector - 1))
+                   / bpb.bytes_per_sector;
+
+data_start = bpb.reserved_sectors
+           + (bpb.num_fats * fat_size)
+           + root_dir_sectors;
+</code></pre>
+
+<p>For FAT32, <code>root_dir_sectors</code> is 0 because the root directory
+is stored as a regular cluster chain in the data region.</p>
+
+<h3>Converting a Cluster Number to a Sector Number</h3>
+
+<p>Clusters are numbered starting at 2 (clusters 0 and 1 are reserved).
+To find the first sector of cluster <em>N</em>:</p>
+
+<pre><code>
+first_sector_of_cluster(N) = data_start + (N - 2) * bpb.sectors_per_cluster;
+</code></pre>
+
+<p>Read <code>bpb.sectors_per_cluster</code> consecutive sectors starting
+from that position to get the entire cluster.</p>
+
+<h3>Long Filename (LFN) Entries</h3>
+
+<p>The standard 8.3 directory entry only stores filenames up to 8+3
+characters. <strong>LFN entries</strong> (introduced in Windows 95)
+store longer filenames in additional 32-byte entries placed immediately
+before the standard entry. Each LFN entry holds up to 13 Unicode
+characters and has its attribute byte set to <code>0x0F</code>
+(a combination of read-only, hidden, system, and volume that older
+systems ignore). When parsing a directory, check for attribute
+<code>0x0F</code> to detect LFN entries.</p>
           `,
+        },
+        {
+          type: "code",
+          label: "FAT directory entry as a C struct (32 bytes)",
+          code: `#include <stdint.h>
+
+/* FAT directory entry -- exactly 32 bytes, packed */
+typedef struct __attribute__((packed)) {
+    char     name[8];           /* 0x00: Filename (space-padded)       */
+    char     ext[3];            /* 0x08: Extension (space-padded)      */
+    uint8_t  attr;              /* 0x0B: Attributes                    */
+    uint8_t  nt_reserved;       /* 0x0C: Reserved for Windows NT      */
+    uint8_t  create_time_tenth; /* 0x0D: Creation time (tenths of sec) */
+    uint16_t create_time;       /* 0x0E: Creation time (HMS packed)    */
+    uint16_t create_date;       /* 0x10: Creation date (YMD packed)    */
+    uint16_t access_date;       /* 0x12: Last access date              */
+    uint16_t cluster_hi;        /* 0x14: First cluster high word (FAT32) */
+    uint16_t write_time;        /* 0x16: Last write time               */
+    uint16_t write_date;        /* 0x18: Last write date               */
+    uint16_t cluster_lo;        /* 0x1A: First cluster low word        */
+    uint32_t file_size;         /* 0x1C: File size in bytes            */
+} fat_dirent_t;
+
+/* Attribute bit masks */
+#define ATTR_READ_ONLY  0x01
+#define ATTR_HIDDEN     0x02
+#define ATTR_SYSTEM     0x04
+#define ATTR_VOLUME_ID  0x08
+#define ATTR_DIRECTORY  0x10
+#define ATTR_ARCHIVE    0x20
+#define ATTR_LFN        0x0F  /* LFN entry (combination of RO+HID+SYS+VOL) */
+
+/* Get the full 32-bit first cluster number */
+static inline uint32_t dirent_first_cluster(const fat_dirent_t *d) {
+    return ((uint32_t)d->cluster_hi << 16) | d->cluster_lo;
+}`,
         },
         {
           type: "video",
@@ -1874,7 +2436,198 @@ the kernel frees the inode and data blocks.</p>
 <p>Real Unix utilities use <code>getopt()</code> to parse flags like
 <code>-l</code>, <code>-a</code>, <code>-r</code>. A simplified approach
 for learning: loop over argv and check if each argument starts with '-'.</p>
+
+<h3>Key Fields of struct stat</h3>
+
+<p>When you call <code>stat(path, &amp;sb)</code>, the kernel fills a
+<code>struct stat</code> with metadata about the file. The most important
+fields:</p>
+
+<ul>
+  <li><code>st_mode</code> &mdash; File type and permissions. Use macros
+      <code>S_ISREG()</code>, <code>S_ISDIR()</code>,
+      <code>S_ISLNK()</code> to test the type. Permission bits can be
+      extracted with <code>st_mode &amp; 0777</code>.</li>
+  <li><code>st_size</code> &mdash; File size in bytes (type
+      <code>off_t</code>).</li>
+  <li><code>st_mtime</code> &mdash; Last modification time as a
+      <code>time_t</code> (seconds since Unix epoch). Pass to
+      <code>localtime()</code> and <code>strftime()</code> for
+      human-readable output.</li>
+  <li><code>st_nlink</code> &mdash; Number of hard links.</li>
+  <li><code>st_uid</code> / <code>st_gid</code> &mdash; Owner and group
+      IDs.</li>
+</ul>
           `,
+        },
+        {
+          type: "code",
+          label: "Complete cat implementation with stdin fallback",
+          code: `/* my_cat.c -- concatenate files to stdout */
+#include <stdio.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
+
+#define BUF_SIZE 4096
+
+/* Copy all bytes from fd to stdout */
+static int cat_fd(int fd) {
+    char buf[BUF_SIZE];
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof(buf))) > 0) {
+        ssize_t written = 0;
+        while (written < n) {
+            ssize_t w = write(STDOUT_FILENO, buf + written, n - written);
+            if (w < 0) { perror("write"); return 1; }
+            written += w;
+        }
+    }
+    if (n < 0) { perror("read"); return 1; }
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    int ret = 0;
+
+    /* No arguments: read from stdin */
+    if (argc < 2) {
+        return cat_fd(STDIN_FILENO);
+    }
+
+    /* Process each file argument */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-") == 0) {
+            ret |= cat_fd(STDIN_FILENO);
+            continue;
+        }
+        int fd = open(argv[i], O_RDONLY);
+        if (fd < 0) {
+            perror(argv[i]);
+            ret = 1;
+            continue;
+        }
+        ret |= cat_fd(fd);
+        close(fd);
+    }
+    return ret;
+}`,
+        },
+        {
+          type: "code",
+          label: "Minimal ls using opendir/readdir/stat",
+          code: `/* my_ls.c -- list directory contents with optional -a and -l flags */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+
+static int show_all = 0;   /* -a flag */
+static int long_fmt = 0;   /* -l flag */
+
+static void print_mode(mode_t m) {
+    putchar(S_ISDIR(m) ? 'd' : S_ISLNK(m) ? 'l' : '-');
+    putchar(m & S_IRUSR ? 'r' : '-');
+    putchar(m & S_IWUSR ? 'w' : '-');
+    putchar(m & S_IXUSR ? 'x' : '-');
+    putchar(m & S_IRGRP ? 'r' : '-');
+    putchar(m & S_IWGRP ? 'w' : '-');
+    putchar(m & S_IXGRP ? 'x' : '-');
+    putchar(m & S_IROTH ? 'r' : '-');
+    putchar(m & S_IWOTH ? 'w' : '-');
+    putchar(m & S_IXOTH ? 'x' : '-');
+}
+
+static int list_dir(const char *path) {
+    DIR *d = opendir(path);
+    if (!d) { perror(path); return 1; }
+
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        /* Skip hidden files unless -a */
+        if (!show_all && ent->d_name[0] == '.') continue;
+
+        if (long_fmt) {
+            /* Build full path for stat() */
+            char fullpath[1024];
+            snprintf(fullpath, sizeof(fullpath), "%s/%s", path, ent->d_name);
+            struct stat sb;
+            if (stat(fullpath, &sb) < 0) { perror(fullpath); continue; }
+
+            print_mode(sb.st_mode);
+            char timebuf[64];
+            strftime(timebuf, sizeof(timebuf), "%b %d %H:%M",
+                     localtime(&sb.st_mtime));
+            printf(" %3ld %8lld %s %s\\n",
+                   (long)sb.st_nlink, (long long)sb.st_size,
+                   timebuf, ent->d_name);
+        } else {
+            printf("%s\\n", ent->d_name);
+        }
+    }
+    closedir(d);
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    int opt_end = 1;
+    /* Simple flag parsing */
+    for (int i = 1; i < argc && argv[i][0] == '-'; i++, opt_end++) {
+        for (const char *p = argv[i] + 1; *p; p++) {
+            if (*p == 'a') show_all = 1;
+            else if (*p == 'l') long_fmt = 1;
+        }
+    }
+    if (opt_end >= argc)
+        return list_dir(".");
+    for (int i = opt_end; i < argc; i++)
+        list_dir(argv[i]);
+    return 0;
+}`,
+        },
+        {
+          type: "code",
+          label: "getopt() usage example",
+          code: `/* getopt_example.c -- standard flag parsing for Unix utilities */
+#include <stdio.h>
+#include <unistd.h>   /* getopt(), optarg, optind */
+
+int main(int argc, char *argv[]) {
+    int aflag = 0, lflag = 0, nflag = 0;
+    char *outfile = NULL;
+    int opt;
+
+    /* "aln" = flags without arguments
+     * "o:" = -o requires an argument (the colon)  */
+    while ((opt = getopt(argc, argv, "alno:")) != -1) {
+        switch (opt) {
+        case 'a': aflag = 1; break;
+        case 'l': lflag = 1; break;
+        case 'n': nflag = 1; break;
+        case 'o': outfile = optarg; break;
+        default:
+            fprintf(stderr, "Usage: %s [-aln] [-o outfile] [file...]\\n",
+                    argv[0]);
+            return 1;
+        }
+    }
+
+    /* After getopt, argv[optind] .. argv[argc-1] are non-option args */
+    printf("Flags: a=%d l=%d n=%d outfile=%s\\n",
+           aflag, lflag, nflag, outfile ? outfile : "(none)");
+    for (int i = optind; i < argc; i++)
+        printf("Arg: %s\\n", argv[i]);
+
+    return 0;
+}
+/* Example: ./a.out -al -o result.txt foo.c bar.c
+ * Flags: a=1 l=1 n=0 outfile=result.txt
+ * Arg: foo.c
+ * Arg: bar.c
+ */`,
         },
         {
           type: "video",

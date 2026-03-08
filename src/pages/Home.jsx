@@ -99,11 +99,6 @@ export default function Home() {
                 </div>
               </div>
               <div className="card-desc">{section.description}</div>
-              <div className="card-topics">
-                {section.topics.map((t, j) => (
-                  <span className="topic-tag" key={j}>{t}</span>
-                ))}
-              </div>
             </div>
           </Link>
         ))}

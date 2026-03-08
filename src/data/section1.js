@@ -33,7 +33,7 @@ export const section1 = {
 <li><strong>P-type:</strong> Has "holes" — spots where electrons are missing (positive charge carriers). Doped with elements like boron.</li>
 </ul>
 
-<p>When you sandwich these types together (N-P-N or P-N-P), you get a transistor. The junction between the layers creates a <strong>depletion zone</strong> where no current flows — until you apply a voltage to the middle layer (the "base" or "gate"), which allows current to flow through.</p>
+<p>When you sandwich these types together (N-P-N or P-N-P), you get a transistor. The junction between the layers creates a <strong>depletion zone</strong> where no current flows — until you apply a voltage to the middle layer (the "base" or "gate"), which allows current to flow through. At each P-N junction, an internal electric field forms as electrons from the N-side diffuse into the P-side and recombine with holes; this field acts as a barrier that prevents further current flow until an external voltage overcomes it.</p>
 
 <h3>Types of Transistors</h3>
 <p>There are two main families you need to know about:</p>
@@ -106,6 +106,35 @@ Truth Table:
   0 | 1 |   1
   1 | 0 |   1
   1 | 1 |   0      ← Only LOW when BOTH inputs are HIGH` },
+        { type: 'text', html: `
+<h3>NOR Gate: The Other Universal Gate</h3>
+<p>While the NAND gate uses parallel PMOS and series NMOS, the <strong>NOR gate</strong> is constructed the opposite way: <strong>series PMOS</strong> (both must be on to pull output HIGH) and <strong>parallel NMOS</strong> (either one on pulls output LOW). This duality comes directly from De Morgan&apos;s Laws.</p>
+`},
+        { type: 'diagram', content: `
+NOR Gate (2 PMOS in series + 2 NMOS in parallel):
+
+    VDD
+     |
+   [PMOS_A]              <- Both PMOS must be on to pull HIGH
+     |
+   [PMOS_B]
+     |
+     +-----+-----+
+           |
+         Output
+           |
+     +-----+-----+
+     |           |
+   [NMOS_A]   [NMOS_B]   <- Either NMOS on pulls output LOW
+     |           |
+    GND         GND
+
+Truth Table:
+  A | B | Output
+  0 | 0 |   1      <- Only HIGH when BOTH inputs are LOW
+  0 | 1 |   0
+  1 | 0 |   0
+  1 | 1 |   0` },
         { type: 'info', variant: 'tip', title: 'Why NAND is Special',
           html: '<p>The NAND gate is called a <strong>universal gate</strong> because you can build ANY other logic gate (AND, OR, NOT, XOR) using only NAND gates. This means an entire computer can theoretically be built from just NAND gates! This is the basis of the "NAND to Tetris" educational approach.</p>' },
         { type: 'text', html: `
@@ -147,6 +176,60 @@ Truth Table:
         },
         { type: 'info', variant: 'info', title: "De Morgan's Laws are Crucial",
           html: "<p>De Morgan's Laws tell us that a NAND gate is equivalent to an OR gate with inverted inputs, and a NOR gate is equivalent to an AND gate with inverted inputs. These laws are used constantly in digital design to simplify and optimize circuits.</p>" },
+        { type: 'text', html: `
+<h4>Worked Example: Boolean Simplification</h4>
+<p>Let&apos;s simplify the expression <strong>A&middot;B + A&middot;!B</strong> step by step using the laws above:</p>
+<table>
+<tr><th>Step</th><th>Expression</th><th>Law Used</th></tr>
+<tr><td>1</td><td>A&middot;B + A&middot;!B</td><td>Starting expression</td></tr>
+<tr><td>2</td><td>A&middot;(B + !B)</td><td>Distributive law (factor out A)</td></tr>
+<tr><td>3</td><td>A&middot;1</td><td>Complement law: B + !B = 1</td></tr>
+<tr><td>4</td><td>A</td><td>Identity law: A&middot;1 = A</td></tr>
+</table>
+<p>This means: if A is true, the output is true regardless of B. We reduced a 2-gate circuit to a single wire!</p>
+<p>Another example &mdash; simplify <strong>!(!A&middot;!B)</strong>:</p>
+<table>
+<tr><th>Step</th><th>Expression</th><th>Law Used</th></tr>
+<tr><td>1</td><td>!(!A&middot;!B)</td><td>Starting expression</td></tr>
+<tr><td>2</td><td>!!A + !!B</td><td>De Morgan&apos;s: !(X&middot;Y) = !X + !Y</td></tr>
+<tr><td>3</td><td>A + B</td><td>Double negation: !!A = A</td></tr>
+</table>
+<p>A NAND gate with inverted inputs is just an OR gate &mdash; exactly what De Morgan&apos;s Law tells us.</p>
+`},
+        { type: 'text', html: `
+<h3>XOR from NAND Gates</h3>
+<p>Since the NAND gate is universal, we can build any gate from NANDs alone. Here is the classic <strong>4-NAND XOR</strong> construction:</p>
+`},
+        { type: 'diagram', content: `
+XOR gate built from 4 NAND gates:
+
+  A ──┬──→[NAND1]──→ P ──┬──→[NAND3]──→ Output (A XOR B)
+      |       ↑            |       ↑
+      |       B            |       |
+      +──→[NAND2]──→ Q ───+       |
+            ↑                      |
+            B ─────────────────────+
+
+Wiring detail:
+  NAND1: inputs = A, B        → P = !(A & B)
+  NAND2: inputs = A, P        → Q = !(A & !(A & B))
+  NAND3: inputs = P, B        → R = !(!(A & B) & B)
+  NAND4: inputs = Q, R        → Output = !(Q & R) = A XOR B
+
+Wait — let's be precise. The standard 4-NAND XOR is:
+
+  NAND1: inputs = A, B         →  N1 = !(A & B)
+  NAND2: inputs = A, N1        →  N2 = !(A & N1)
+  NAND3: inputs = N1, B        →  N3 = !(N1 & B)
+  NAND4: inputs = N2, N3       →  Out = !(N2 & N3) = A XOR B
+
+Verify with A=1, B=0:
+  N1 = !(1 & 0) = 1
+  N2 = !(1 & 1) = 0
+  N3 = !(1 & 0) = 1
+  Out = !(0 & 1) = 1  ✓  (1 XOR 0 = 1)
+
+Transistor count: 4 NAND gates x 4 transistors each = 16 transistors` },
         { type: 'text', html: `
 <h3>From Gates to Computing</h3>
 <p>With just these basic gates, we can build increasingly complex circuits:</p>
@@ -247,6 +330,8 @@ FPGA Internal Architecture (Simplified):
 <li>1 output</li>
 </ul>
 <p>The 4 inputs act as an address to select which memory cell's value appears at the output. To make the LUT implement a specific function, you just program the 16 memory cells with the desired truth table values.</p>
+
+<p><strong>Physically</strong>, a 4-input LUT is implemented as <strong>16 SRAM cells</strong> (tiny memory bits that hold 0 or 1) feeding into a <strong>16:1 multiplexer</strong>. The 4 input signals serve as the multiplexer&apos;s select lines, choosing which of the 16 stored bits to route to the output. When you &ldquo;program&rdquo; the FPGA, you&apos;re writing values into these SRAM cells. A 6-input LUT works the same way but with 64 SRAM cells and a 64:1 mux &mdash; more capable but uses more silicon area.</p>
 `},
         { type: 'diagram', content: `
 4-Input LUT Implementing AND(A,B) OR (C AND D):
@@ -275,6 +360,30 @@ The LUT stores: 0001000100011111 (16 bits)` },
 <h3>Flip-Flops: Adding Memory</h3>
 <p>Each CLB also contains <strong>flip-flops</strong> (FFs) — simple 1-bit memory elements. A flip-flop captures and holds a value on the rising edge of a clock signal. This is how FPGAs implement sequential logic (circuits that have state/memory).</p>
 
+<p>A <strong>clock signal</strong> is a square wave that continuously alternates between LOW (0) and HIGH (1) at a fixed frequency &mdash; for example, a 100 MHz clock toggles 100 million times per second. The <strong>rising edge</strong> is the instant the clock transitions from 0 to 1. A <strong>D flip-flop</strong> (the most common type) has a data input (D), a clock input (CLK), and an output (Q). On each rising edge of CLK, the flip-flop samples whatever value is on D and holds it at Q until the next rising edge. Between clock edges, Q does not change, no matter what D does.</p>
+`},
+        { type: 'diagram', content: `
+D Flip-Flop at the Gate Level (built from NAND gates):
+
+        D ──→[NAND1]──→[NAND3]──→ Q
+              ↑    ↑      ↑   |
+              |    |      |   +──→[NAND4]──→ Q' (inverted)
+              |   CLK     |         ↑
+              |    |      +---------+
+              |    ↓                |
+        D'──→[NAND2]──→[NAND4]──---+
+              ↑
+             (D inverted by a NOT gate)
+
+Simplified behavior:
+
+    CLK: ___|‾‾‾|___|‾‾‾|___|‾‾‾|___
+      D: ___/‾‾‾‾‾‾‾‾\\__/‾‾‾‾‾‾‾\\___
+      Q: ______/‾‾‾‾‾‾‾‾‾‾‾\\__/‾‾‾‾‾
+
+Q changes only on rising edges (↑) of CLK,
+capturing whatever D is at that instant.` },
+        { type: 'text', html: `
 <p>The combination of LUTs and flip-flops means each CLB can implement both:</p>
 <ul>
 <li><strong>Combinational logic:</strong> Output = function(inputs) — instant, no memory</li>
@@ -287,7 +396,7 @@ The LUT stores: 0001000100011111 (16 bits)` },
 <li><strong>Synthesis:</strong> Tools convert your HDL into a netlist of LUTs, FFs, and connections</li>
 <li><strong>Place and Route:</strong> Tools map the netlist to specific physical CLBs and routing channels</li>
 <li><strong>Bitstream generation:</strong> A binary configuration file is created</li>
-<li><strong>Programming:</strong> The bitstream is loaded into the FPGA (via JTAG or flash), configuring all LUTs, FFs, and routing</li>
+<li><strong>Programming:</strong> The bitstream is loaded into the FPGA (via JTAG &mdash; Joint Test Action Group, a standard debug/programming interface &mdash; or flash memory), configuring all LUTs, FFs, and routing</li>
 </ol>
 
 <h3>FPGA vs ASIC vs CPU</h3>
@@ -308,10 +417,21 @@ The LUT stores: 0001000100011111 (16 bits)` },
         { type: 'video', id: 'lLg1AgA2Xoo', title: 'Introduction to FPGA Part 1 — What is an FPGA? (DigiKey / Shawn Hymel)' },
         { type: 'video', id: 'l3d8uFKsJiY', title: 'The Harsh Truth about FPGAs — You Should Avoid Them?! (GreatScott!)' },
         { type: 'video', id: 'd86ws7mQYIg', title: 'How does Computer Hardware Work? — 3D Animated Teardown (Branch Education)' },
+        { type: 'text', html: `
+<h3>Popular FPGA Boards for Beginners</h3>
+<p>Here are three commonly recommended boards for learning FPGA development:</p>
+`},
+        { type: 'table', headers: ['Board', 'Price', 'FPGA Chip', 'LUTs', 'Flip-Flops', 'Block RAM', 'Notes'],
+          rows: [
+            ['Lattice iCEstick', '~$30', 'iCE40HX1K', '1,280', '1,280', '64 Kbit', 'USB thumb-drive form factor; fully supported by open-source tools (Yosys + nextpnr)'],
+            ['TinyFPGA BX', '~$40', 'iCE40LP8K', '7,680', '7,680', '128 Kbit', 'Tiny breadboard-friendly board; open-source toolchain; good community'],
+            ['Digilent Basys 3', '~$150', 'Xilinx Artix-7 (XC7A35T)', '33,280', '41,600', '1,800 Kbit', 'Full dev board with switches, LEDs, 7-segment displays; uses Xilinx Vivado (free edition)'],
+          ]
+        },
         { type: 'practice', title: 'Practice Exercises', items: [
           'Write out the 16-bit LUT contents for a 4-input XOR function (A XOR B XOR C XOR D)',
           'Calculate how many LUTs would be needed to implement an 8-bit adder (hint: each bit needs a sum and carry)',
-          'Research and list the specifications of 3 popular FPGA boards under $100 (number of LUTs, flip-flops, block RAM)',
+          'Compare the 3 FPGA boards listed above (Lattice iCEstick, TinyFPGA BX, Digilent Basys 3) and explain which one you would choose for this course and why',
           'Explain why a 6-input LUT is more efficient than a 4-input LUT for complex functions, but uses more memory',
           'Draw a diagram showing how a D flip-flop works with a clock signal',
         ]},
@@ -392,6 +512,17 @@ module and_gate (
 );
     assign y = a & b;   // Continuous assignment: y is always a AND b
 endmodule` },
+        { type: 'info', variant: 'info', title: 'Verilog Syntax Primer',
+          html: `<p>Before moving on, here is a quick reference for the Verilog keywords used above and throughout this course:</p>
+<ul>
+<li><strong>module / endmodule</strong> &mdash; Define a hardware block (like a function in software). Every design is one or more modules.</li>
+<li><strong>input / output</strong> &mdash; Declare the ports (connections) of a module.</li>
+<li><strong>wire</strong> &mdash; A combinational signal &mdash; just a connection with no storage. Think of a physical wire.</li>
+<li><strong>reg</strong> &mdash; A variable that can hold state (used inside <code>always</code> blocks). Despite the name, it does not always become a hardware register.</li>
+<li><strong>assign</strong> &mdash; Continuous assignment: the left-hand side is always driven by the right-hand expression. E.g., <code>assign y = a &amp; b;</code> means y is always a AND b.</li>
+<li><strong>[N:0]</strong> &mdash; Multi-bit (vector) signals. <code>wire [7:0] data</code> declares an 8-bit signal (bits 7 down to 0).</li>
+<li><strong>always @(posedge clk)</strong> &mdash; A sequential block that executes on the rising edge of the clock. This is how you describe flip-flops and registers: <code>always @(posedge clk) q &lt;= d;</code></li>
+</ul>` },
         { type: 'text', html: `<h4>Step 2: Write a C++ testbench</h4>` },
         { type: 'code', label: 'tb_and_gate.cpp', code: `#include <stdio.h>
 #include <stdlib.h>
@@ -420,6 +551,18 @@ int main(int argc, char **argv) {
     delete dut;
     return 0;
 }` },
+        { type: 'info', variant: 'info', title: 'Testbench Line-by-Line',
+          html: `<p>Here is what each key line in the testbench does:</p>
+<ul>
+<li><code>#include "Vand_gate.h"</code> &mdash; Header auto-generated by Verilator from <code>and_gate.v</code>. The class is always named <code>V</code> + module name.</li>
+<li><code>#include "verilated.h"</code> &mdash; Verilator runtime library; provides <code>Verilated::commandArgs()</code> and simulation infrastructure.</li>
+<li><code>Verilated::commandArgs(argc, argv)</code> &mdash; Initializes Verilator runtime; passes any +args from the command line (e.g., +trace).</li>
+<li><code>Vand_gate *dut = new Vand_gate</code> &mdash; Creates an instance of your Verilog module. &ldquo;DUT&rdquo; stands for Device Under Test.</li>
+<li><code>dut-&gt;a = a</code> &mdash; Sets the value of input port <code>a</code>. Verilator exposes every port as a C++ member variable.</li>
+<li><code>dut-&gt;eval()</code> &mdash; Evaluates all combinational logic. You must call this after changing any input to update outputs.</li>
+<li><code>dut-&gt;y</code> &mdash; Reads the output port. After <code>eval()</code>, this reflects the current result of the circuit.</li>
+<li><code>delete dut</code> &mdash; Cleans up the simulation object and frees memory.</li>
+</ul>` },
         { type: 'text', html: `<h4>Step 3: Build and run</h4>` },
         { type: 'code', label: 'Terminal commands', code: `# Generate C++ from Verilog
 verilator --cc and_gate.v --exe tb_and_gate.cpp
@@ -429,6 +572,16 @@ make -C obj_dir -f Vand_gate.mk Vand_gate
 
 # Run it!
 ./obj_dir/Vand_gate` },
+        { type: 'info', variant: 'info', title: 'Verilator Command-Line Flags',
+          html: `<p>Key flags used in the commands above:</p>
+<ul>
+<li><code>--cc</code> &mdash; Generate C++ output (as opposed to <code>--sc</code> for SystemC). This produces <code>.cpp</code> and <code>.h</code> files in <code>obj_dir/</code>.</li>
+<li><code>--exe</code> &mdash; Tell Verilator to include your testbench C++ file and generate a complete Makefile that builds an executable (not just a library).</li>
+<li><code>--trace</code> &mdash; Enable VCD waveform tracing support. Without this flag, calls to <code>trace()</code> in your testbench will fail to compile.</li>
+</ul>
+<p>The <code>obj_dir/</code> directory is Verilator&apos;s output folder. It contains the generated C++ model, a Makefile, and (after building) the compiled executable. You generally don&apos;t need to edit anything in <code>obj_dir/</code> &mdash; it&apos;s regenerated each time you run Verilator.</p>` },
+        { type: 'info', variant: 'tip', title: 'Windows Users',
+          html: '<p>Verilator does not run natively on Windows. Use <strong>WSL</strong> (Windows Subsystem for Linux) to get a full Linux environment, then follow the Ubuntu/Debian installation instructions. WSL 2 is recommended for best performance. Alternatively, a Linux virtual machine or Docker container works fine.</p>' },
         { type: 'text', html: `<h4>Expected output:</h4>` },
         { type: 'code', code: `A | B | Y
 --+---+--
@@ -476,7 +629,6 @@ gtkwave waveform.vcd   # Open waveform viewer` },
         { type: 'info', variant: 'success', title: 'GTKWave',
           html: '<p>Install GTKWave with <code>brew install --cask gtkwave</code> (macOS) or <code>sudo apt install gtkwave</code> (Linux). It lets you visually inspect every signal in your design over time — essential for debugging hardware.</p>' },
 
-        { type: 'video', id: 'KMpFn-FQrTg', title: 'Verilator Introduction Tutorial' },
         { type: 'practice', title: 'Practice Exercises', items: [
           'Create a Verilog XOR gate and simulate it with Verilator — verify all 4 input combinations',
           'Build a 4-bit adder in Verilog and write a testbench that tests at least 10 different addition operations',

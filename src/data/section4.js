@@ -138,7 +138,45 @@ AST for: if (x > 5) { return x; } else { return 0; }
 <li><strong>Scope resolution:</strong> Is variable <code>x</code> defined in this scope?</li>
 <li><strong>Function signatures:</strong> Does the function call match the declaration?</li>
 </ul>
-<p>For our simplified C compiler, we can keep this phase minimal.</p>
+<p>For our simplified C compiler, we can keep this phase minimal. But even a minimal semantic pass needs a <strong>symbol table</strong> — a data structure that tracks which names are visible at each point in the program.</p>
+
+<h4>Symbol Table with Nested Scopes</h4>
+<p>The symbol table is organized as a stack of scopes. Entering a block (<code>{</code>) pushes a new scope; leaving (<code>}</code>) pops it. A name lookup walks from the innermost scope outward, so inner declarations <strong>shadow</strong> outer ones:</p>
+<pre><code>// Given this C code:
+int x = 1;                  // global scope
+int foo(int x) {            // foo scope: parameter x shadows global x
+    int y = x + 1;
+    if (y > 0) {
+        int z = y + x;      // if-scope: sees y and x from foo scope
+        return z;
+    }
+    return y;
+}
+
+// Symbol table at the point &quot;int z = y + x;&quot;:
+//
+//   Scope 2 (if-block):
+//     z  -&gt;  { type: int, kind: local, offset: -16 }
+//
+//   Scope 1 (foo body):
+//     x  -&gt;  { type: int, kind: param, offset: -4  }
+//     y  -&gt;  { type: int, kind: local, offset: -8  }
+//
+//   Scope 0 (global):
+//     x  -&gt;  { type: int, kind: global, addr: 0x10000 }
+//     foo -&gt; { type: int(int), kind: function }
+//
+// Looking up &quot;x&quot; starts at scope 2 (not found),
+// then scope 1 — found! Parameter x shadows the global x.</code></pre>
+
+<h4>The Maximal Munch Rule</h4>
+<p>One subtlety in lexing: when the lexer sees the characters <code>x---y</code>, how should it tokenize them? There are two possibilities:</p>
+<ul>
+<li><code>x</code> <code>--</code> <code>-</code> <code>y</code> which means <code>(x--) - y</code> (post-decrement x, then subtract y)</li>
+<li><code>x</code> <code>-</code> <code>--</code> <code>y</code> which means <code>x - (--y)</code> (subtract pre-decremented y from x)</li>
+</ul>
+<p>C resolves this with the <strong>maximal munch</strong> (or longest match) rule: the lexer always takes the longest possible token at each step. Reading left to right from <code>---</code>, the longest match starting at the first <code>-</code> is <code>--</code> (the decrement operator). The remaining <code>-</code> becomes a minus operator. So <code>x---y</code> is tokenized as <code>x</code> <code>--</code> <code>-</code> <code>y</code>, meaning <code>(x--) - y</code>.</p>
+<p>This is why the lexer must try multi-character operators like <code>--</code>, <code>==</code>, <code>&lt;&lt;</code>, <code>-&gt;</code> <em>before</em> single-character operators like <code>-</code>, <code>=</code>, <code>&lt;</code>. Our TOKEN_SPEC list in Lesson 2 puts longer patterns first for exactly this reason.</p>
 
 <h3>Phase 4: Code Generation</h3>
 <p>The code generator walks the AST and emits target language code (ARM assembly for us). For each AST node type, it knows the corresponding assembly pattern:</p>
@@ -171,8 +209,7 @@ add:
         { type: 'info', variant: 'tip', title: 'Incremental Development',
           html: '<p>Build your compiler incrementally. Start by compiling programs that just return a number (<code>int main() { return 42; }</code>). Then add arithmetic, then variables, then if/else, then loops, then functions, then pointers. Each step is a small, testable increment.</p>' },
         { type: 'video', id: 'Qkwj65l_96I', title: 'Compilers — Computerphile' },
-        { type: 'video', id: '54bo1qaHAfk', title: 'Writing a C Compiler from Scratch (Tsoding)' },
-        { type: 'video', id: 'LCslqgM48D4', title: 'How Do Computers Read Code? (Spanning Tree)' },
+        { type: 'video', id: 'wSdV1M7n4gQ', title: 'Crafting Interpreters — Introduction' },
         { type: 'practice', title: 'Practice Exercises', items: [
           'Draw the AST for: <code>int result = (a + b) * (c - d);</code>',
           'List all the token types you would need for a subset of C (keywords, operators, punctuation, literals, identifiers)',
@@ -191,9 +228,9 @@ add:
     },
     {
       id: 2,
-      title: "Lexing and Parsing",
-      subtitle: "Turning source text into structured trees",
-      duration: "2 hours",
+      title: "Lexing, Parsing, and ASTs",
+      subtitle: "Building the front end of a compiler from scratch",
+      duration: "2 hrs",
       content: [
         { type: 'text', html: `
 <h2>Building a Lexer</h2>
@@ -511,6 +548,194 @@ class Assign:
         raise SyntaxError(f"Line {tok.line}: unexpected {tok.type}")` },
         { type: 'info', variant: 'info', title: 'Operator Precedence',
           html: '<p>Notice how the parsing functions are layered: <code>parse_additive</code> calls <code>parse_multiplicative</code>, which calls <code>parse_unary</code>, which calls <code>parse_primary</code>. This nesting naturally implements operator precedence — multiplication binds tighter than addition because it is parsed deeper in the call stack.</p>' },
+        { type: 'text', html: `<h3>Parsing Statements, Blocks, and Functions</h3>
+<p>The expression parser above only handles expressions. To parse a complete C program we also need <code>parse_stmt</code> (dispatches to the right statement kind), <code>parse_block</code> (a <code>{...}</code> sequence of statements), and <code>parse_function</code> (the top-level declaration). These are not optional exercises — they are critical path:</p>` },
+        { type: 'code', label: 'parser.py — Statement, block, and function parsing', code: `    # --- Statement Parsing ---
+
+    def is_type(self):
+        """Check if current token starts a type specifier."""
+        return self.peek().type in ('INT', 'CHAR', 'VOID')
+
+    def parse_type(self):
+        """Parse a type: int, char, void, or pointer types like int*."""
+        tok = self.expect(self.peek().type)  # consume INT/CHAR/VOID
+        type_name = tok.value
+        while self.match('STAR'):
+            type_name += '*'
+        return type_name
+
+    def parse_stmt(self):
+        """Parse a single statement — dispatches by token type."""
+        tok = self.peek()
+
+        if tok.type == 'LBRACE':
+            return self.parse_block()
+
+        elif tok.type == 'IF':
+            self.advance()
+            self.expect('LPAREN')
+            cond = self.parse_expr()
+            self.expect('RPAREN')
+            then_body = self.parse_stmt()
+            else_body = None
+            if self.match('ELSE'):
+                else_body = self.parse_stmt()
+            return IfStmt(cond, then_body, else_body)
+
+        elif tok.type == 'WHILE':
+            self.advance()
+            self.expect('LPAREN')
+            cond = self.parse_expr()
+            self.expect('RPAREN')
+            body = self.parse_stmt()
+            return WhileStmt(cond, body)
+
+        elif tok.type == 'FOR':
+            self.advance()
+            self.expect('LPAREN')
+            # for (init; cond; update) body
+            init = None
+            if not self.match('SEMI'):
+                if self.is_type():
+                    init = self.parse_var_decl()  # consumes semicolon
+                else:
+                    init = self.parse_expr()
+                    self.expect('SEMI')
+            cond = None
+            if not self.match('SEMI'):
+                cond = self.parse_expr()
+                self.expect('SEMI')
+            update = None
+            if self.peek().type != 'RPAREN':
+                update = self.parse_expr()
+            self.expect('RPAREN')
+            body = self.parse_stmt()
+            # Desugar for-loop into init + while:
+            stmts = []
+            if init: stmts.append(init)
+            loop_body_stmts = [body]
+            if update: loop_body_stmts.append(update)
+            if cond is None: cond = IntLit(1)  # for(;;) = infinite
+            stmts.append(WhileStmt(cond, Block(loop_body_stmts)))
+            return Block(stmts)
+
+        elif tok.type == 'RETURN':
+            self.advance()
+            expr = None
+            if self.peek().type != 'SEMI':
+                expr = self.parse_expr()
+            self.expect('SEMI')
+            return ReturnStmt(expr)
+
+        elif self.is_type():
+            return self.parse_var_decl()
+
+        else:
+            # Expression statement (assignment, function call, etc.)
+            expr = self.parse_expr()
+            self.expect('SEMI')
+            return expr
+
+    def parse_var_decl(self):
+        """Parse: type name [= expr] ;"""
+        vtype = self.parse_type()
+        name = self.expect('IDENT').value
+        init = None
+        if self.match('ASSIGN'):
+            init = self.parse_expr()
+        self.expect('SEMI')
+        return VarDecl(vtype, name, init)
+
+    def parse_block(self):
+        """Parse: { stmt* }"""
+        self.expect('LBRACE')
+        stmts = []
+        while self.peek().type != 'RBRACE':
+            stmts.append(self.parse_stmt())
+        self.expect('RBRACE')
+        return Block(stmts)
+
+    def parse_function(self):
+        """Parse: type name(params) block"""
+        ret_type = self.parse_type()
+        name = self.expect('IDENT').value
+        self.expect('LPAREN')
+        params = []
+        if self.peek().type != 'RPAREN':
+            ptype = self.parse_type()
+            pname = self.expect('IDENT').value
+            params.append((ptype, pname))
+            while self.match('COMMA'):
+                ptype = self.parse_type()
+                pname = self.expect('IDENT').value
+                params.append((ptype, pname))
+        self.expect('RPAREN')
+        body = self.parse_block()
+        return FuncDef(ret_type, name, params, body)
+
+    def parse_program(self):
+        """Top level: parse functions until EOF."""
+        decls = []
+        while self.peek().type != 'EOF':
+            decls.append(self.parse_function())
+        return Program(decls)` },
+        { type: 'text', html: `<h3>End-to-End Example: Source to Tokens to AST</h3>
+<p>Here is a complete trace showing a small C function going through the lexer and parser. This is the full pipeline you have now built:</p>` },
+        { type: 'code', label: 'End-to-end: C source to tokens to AST', code: `# --- Input C source ---
+source = """
+int double_it(int x) {
+    return x * 2;
+}
+"""
+
+# --- Step 1: Lexing ---
+tokens = tokenize(source)
+# Token stream:
+#   Token(INT,     'int')
+#   Token(IDENT,   'double_it')
+#   Token(LPAREN,  '(')
+#   Token(INT,     'int')
+#   Token(IDENT,   'x')
+#   Token(RPAREN,  ')')
+#   Token(LBRACE,  '{')
+#   Token(RETURN,  'return')
+#   Token(IDENT,   'x')
+#   Token(STAR,    '*')
+#   Token(INT_LIT, '2')
+#   Token(SEMI,    ';')
+#   Token(RBRACE,  '}')
+#   Token(EOF,     '')
+
+# --- Step 2: Parsing ---
+parser = Parser(tokens)
+ast = parser.parse_program()
+
+# --- Resulting AST ---
+# Program
+#   FuncDef
+#     return_type: "int"
+#     name: "double_it"
+#     params: [("int", "x")]
+#     body: Block
+#       ReturnStmt
+#         expr: BinOp('*')
+#           left:  Ident("x")
+#           right: IntLit(2)
+
+# --- Step 3: Code Generation (preview of Lesson 3) ---
+# The code generator would walk this AST and emit:
+#
+#   double_it:
+#       PUSH {FP, LR}
+#       MOV  FP, SP
+#       PUSH {R0}           ; save param x at [FP, #-4]
+#       LDR  R0, [FP, #-4]  ; load x
+#       PUSH {R0}
+#       MOV  R0, #2          ; load 2
+#       POP  {R1}            ; R1 = x
+#       MUL  R0, R1, R0      ; R0 = x * 2
+#       MOV  SP, FP
+#       POP  {FP, PC}        ; return with result in R0` },
         { type: 'video', id: 'SToUyjAsaFk', title: 'Pratt Parser From Scratch (Tsoding)' },
         { type: 'video', id: '4m7ubrdbWQU', title: 'Parsing Explained (Computerphile)' },
         { type: 'practice', title: 'Practice Exercises', items: [
@@ -532,8 +757,8 @@ class Assign:
     {
       id: 3,
       title: "Code Generation for ARM",
-      subtitle: "Turning ASTs into assembly that runs on your CPU",
-      duration: "2 hours",
+      subtitle: "Walking the AST, emitting ARM assembly, calling conventions",
+      duration: "2 hrs",
       content: [
         { type: 'text', html: `
 <h2>Code Generation</h2>
@@ -635,12 +860,38 @@ Lower addresses` },
             offset = self.locals[node.target.name]
             self.emit(f"    STR R0, [FP, #{offset}]")
 
+        elif isinstance(node, UnaryOp):
+            self.gen_expr(node.operand)
+            if node.op == '-':
+                # Negate: -x  =>  RSB R0, R0, #0  (R0 = 0 - R0)
+                self.emit("    RSB R0, R0, #0")
+            elif node.op == '*':
+                # Dereference: *p  =>  LDR R0, [R0]
+                self.emit("    LDR R0, [R0]")
+            elif node.op == '&':
+                # Address-of: &x  =>  ADD R0, FP, #offset
+                # operand must be an Ident so we can look up its stack offset
+                if isinstance(node.operand, Ident):
+                    offset = self.locals[node.operand.name]
+                    self.emit(f"    ADD R0, FP, #{offset}")
+                else:
+                    raise Exception("Address-of requires an lvalue")
+            elif node.op == '~':
+                self.emit("    MVN R0, R0")
+            elif node.op == '!':
+                # Logical NOT: !x  =>  CMP R0, #0; MOVEQ R0, #1; MOVNE R0, #0
+                self.emit("    CMP R0, #0")
+                self.emit("    MOVEQ R0, #1")
+                self.emit("    MOVNE R0, #0")
+
         elif isinstance(node, FuncCall):
-            # Push args in reverse, then call
-            for i, arg in enumerate(node.args[:4]):
+            # Evaluate each argument, push onto stack to preserve across evals
+            for arg in node.args[:4]:
                 self.gen_expr(arg)
-                if i < len(node.args) - 1:
-                    self.emit(f"    MOV R{i}, R0")
+                self.emit("    PUSH {R0}")
+            # Pop args from stack into R0-R3 in reverse order
+            for i in range(min(len(node.args), 4) - 1, -1, -1):
+                self.emit(f"    POP {{R{i}}}")
             self.emit(f"    BL {node.name}")
             # Result is in R0` },
         { type: 'text', html: `<h3>Generating Control Flow</h3>` },
@@ -703,6 +954,47 @@ Lower addresses` },
         # Default return
         self.emit("    MOV SP, FP")
         self.emit("    POP {FP, PC}")` },
+        { type: 'text', html: `<h3>For-Loop Code Generation</h3>
+<p>A <code>for</code> loop is syntactic sugar for a <code>while</code> loop. The parser desugars it (as shown in Lesson 2), but if you prefer to handle it directly in codegen, the decomposition is:</p>
+<pre><code>// for (init; cond; update) body
+//
+// becomes:
+//   init
+//   while (cond) {
+//       body
+//       update
+//   }
+
+// Example: for (int i = 0; i &lt; 10; i = i + 1) { sum = sum + i; }
+// Generates:
+//   SUB  SP, SP, #4        ; allocate i
+//   MOV  R0, #0
+//   STR  R0, [FP, #-4]     ; i = 0
+// for_1:
+//   LDR  R0, [FP, #-4]     ; load i
+//   PUSH {R0}
+//   MOV  R0, #10
+//   POP  {R1}
+//   CMP  R1, R0             ; i &lt; 10?
+//   BLT  true_2
+//   MOV  R0, #0
+//   B    end_3
+// true_2:
+//   MOV  R0, #1
+// end_3:
+//   CMP  R0, #0
+//   BEQ  endfor_4
+//   ... body (sum = sum + i) ...
+//   LDR  R0, [FP, #-4]     ; update: i = i + 1
+//   PUSH {R0}
+//   MOV  R0, #1
+//   POP  {R1}
+//   ADD  R0, R1, R0
+//   STR  R0, [FP, #-4]
+//   B    for_1
+// endfor_4:</code></pre>` },
+        { type: 'info', variant: 'warning', title: 'Division on ARM',
+          html: '<p>ARM (ARMv4/v5) has no hardware integer divide instruction. For the <code>/</code> and <code>%</code> operators, the code generator must emit <code>BL __aeabi_idiv</code> (for signed division) or <code>BL __aeabi_uidiv</code> (unsigned), which are helper functions you provide in your libc. The convention is: dividend in R0, divisor in R1, quotient returned in R0, remainder in R1. You must implement these functions in assembly or C as part of your runtime library.</p>' },
         { type: 'code', label: 'Example: C to ARM compilation', code: `// C source:
 int sum(int n) {
     int total = 0;
@@ -778,7 +1070,7 @@ endwhile_4:
     {
       id: 4,
       title: "Writing a Linker",
-      subtitle: "Combining object files into executables",
+      subtitle: "Object files, ELF format, symbol resolution, and relocation",
       duration: "90 min",
       content: [
         { type: 'text', html: `
@@ -820,6 +1112,24 @@ ELF File Structure:
 ├──────────────────┤
 │ Section Headers  │  Describes each section (name, size, offset, etc.)
 └──────────────────┘` },
+        { type: 'text', html: `<h4>ELF Header Fields</h4>
+<p>The ELF header is the first thing in the file. For a 32-bit ARM binary it is 52 bytes:</p>` },
+        { type: 'table', headers: ['Offset', 'Size', 'Field', 'Value (ARM)'],
+          rows: [
+            ['0x00', '4 bytes', 'Magic number', '0x7F 0x45 0x4C 0x46 ("\\x7FELF")'],
+            ['0x04', '1 byte', 'Class', '1 = 32-bit (ELFCLASS32)'],
+            ['0x05', '1 byte', 'Data encoding', '1 = little-endian (ELFDATA2LSB)'],
+            ['0x06', '1 byte', 'ELF version', '1 (EV_CURRENT)'],
+            ['0x07', '1 byte', 'OS/ABI', '0 (ELFOSABI_NONE)'],
+            ['0x10', '2 bytes', 'Type', '2 = executable (ET_EXEC), 1 = relocatable (ET_REL)'],
+            ['0x12', '2 bytes', 'Machine', '0x28 = ARM (EM_ARM)'],
+            ['0x18', '4 bytes', 'Entry point', 'Virtual address of _start or main'],
+            ['0x1C', '4 bytes', 'Program header offset', 'Offset to program header table (usually 52)'],
+            ['0x20', '4 bytes', 'Section header offset', 'Offset to section header table'],
+            ['0x2C', '2 bytes', 'Section header entry size', '40 bytes for 32-bit'],
+            ['0x30', '2 bytes', 'Section header count', 'Number of sections'],
+          ]
+        },
         { type: 'text', html: `
 <h3>Symbols and Relocation</h3>
 <p>A <strong>symbol</strong> is a named entity — a function or global variable. Each object file has a symbol table listing:</p>
@@ -917,6 +1227,70 @@ class Linker:
         if entry_sym:
             print(f"Entry point: {entry} @ 0x{entry_sym.final_addr:08X}")
         print(f"Output: {output_file} ({len(output)} bytes)")` },
+        { type: 'info', variant: 'info', title: 'Raw Binary vs. Full ELF',
+          html: '<p>For simplicity, our linker produces a <strong>raw binary</strong> (just concatenated .text and .data bytes), not a full ELF file. A real linker would prepend a 52-byte ELF header, program headers for the loader, and section headers for debuggers. The raw binary approach works perfectly for bare-metal: we load the binary at a known base address and jump to the entry point. If you later want to run on Linux, you will need to emit proper ELF headers.</p>' },
+        { type: 'info', variant: 'info', title: 'The ARM Pipeline Offset (-8)',
+          html: '<p>Notice the <code>- 8</code> in the BL relocation formula: <code>offset = (target - patch_addr - 8) >> 2</code>. This accounts for the ARM pipeline. ARM uses a 3-stage pipeline (fetch, decode, execute), and by the time an instruction executes, the PC has already advanced 8 bytes past that instruction (two instructions ahead). So a branch at address 0x1000 sees PC = 0x1008. The <code>- 8</code> compensates for this, ensuring the branch offset is calculated from the actual PC value during execution, not from the instruction address.</p>' },
+        { type: 'text', html: `<h3>End-to-End Linking Example</h3>
+<p>Let us trace a concrete example of linking two source files into a single executable:</p>` },
+        { type: 'code', label: 'Linking two files: main.c and math.c', code: `# === Source files ===
+# main.c:                       math.c:
+#   extern int add(int, int);     int add(int a, int b) {
+#   int main() {                      return a + b;
+#       return add(3, 4);         }
+#   }
+
+# === After compilation, we have two object files ===
+
+# main.o:
+#   .text (12 bytes):
+#     0x00: MOV R0, #3          ; E3A00003
+#     0x04: MOV R1, #4          ; E3A01004
+#     0x08: BL  add             ; EB000000  (placeholder — offset unknown!)
+#   symbols:
+#     main  -> .text, offset=0, GLOBAL, DEFINED
+#     add   -> UNDEFINED, GLOBAL
+#   relocations:
+#     offset=0x08, symbol="add", type=R_ARM_CALL
+
+# math.o:
+#   .text (8 bytes):
+#     0x00: ADD R0, R0, R1      ; E0800001
+#     0x04: BX  LR              ; E12FFF1E
+#   symbols:
+#     add   -> .text, offset=0, GLOBAL, DEFINED
+
+# === Linking with base_addr = 0x10000 ===
+
+# Phase 1: Assign addresses
+#   main.o .text at 0x10000 (12 bytes)
+#   math.o .text at 0x1000C (8 bytes)
+
+# Phase 2: Resolve symbols
+#   main  -> 0x10000
+#   add   -> 0x1000C
+
+# Phase 3: Apply relocations
+#   Relocation at main.o offset 0x08 (addr 0x10008):
+#     target = add = 0x1000C
+#     patch_addr = 0x10008
+#     offset = (0x1000C - 0x10008 - 8) >> 2 = (-4) >> 2 = -1
+#     -1 in 24-bit = 0xFFFFFF
+#     BL instruction: 0xEB000000 | 0xFFFFFF = 0xEBFFFFFF
+#
+#   Wait — that is negative because of the pipeline offset!
+#   PC at execute time = 0x10008 + 8 = 0x10010
+#   We want to reach 0x1000C, so offset = 0x1000C - 0x10010 = -4
+#   -4 >> 2 = -1, encoded as 0xFFFFFF (24-bit signed)
+
+# Phase 4: Output binary (20 bytes):
+#   0x10000: E3A00003   ; MOV R0, #3
+#   0x10004: E3A01004   ; MOV R1, #4
+#   0x10008: EBFFFFFF   ; BL add (patched!)
+#   0x1000C: E0800001   ; ADD R0, R0, R1
+#   0x10010: E12FFF1E   ; BX LR
+
+# Entry point: main @ 0x10000` },
         { type: 'video', id: 'dOfucXtyEsU', title: 'Linkers, Pair Programming, and Open Source (Computerphile)' },
         { type: 'practice', title: 'Practice Exercises', items: [
           'Use <code>readelf -a</code> on a compiled ARM ELF binary to examine headers, sections, symbols, and relocations',
@@ -935,8 +1309,8 @@ class Linker:
     },
     {
       id: 5,
-      title: "Implementing malloc and a Minimal libc",
-      subtitle: "Dynamic memory allocation and standard library functions",
+      title: "Implementing malloc and libc",
+      subtitle: "Building the heap allocator and essential C library functions",
       duration: "90 min",
       content: [
         { type: 'text', html: `
@@ -1063,6 +1437,10 @@ void free(void *ptr) {
         }
     }
 }` },
+        { type: 'info', variant: 'info', title: 'Why 8-Byte Alignment (the ALIGN Macro)',
+          html: '<p>The <code>ALIGN(size)</code> macro rounds up to the next multiple of 8: <code>((size) + 7) &amp; ~7</code>. For example, ALIGN(5) = 8, ALIGN(8) = 8, ALIGN(13) = 16. Why 8? ARM requires that certain data types be naturally aligned — a 32-bit word must be at a 4-byte boundary, and a 64-bit value (like <code>double</code> or <code>long long</code>) must be at an 8-byte boundary. An unaligned access on ARM either triggers a data abort or silently produces wrong results (depending on CPU configuration). By always aligning to 8, we guarantee any data type can safely be stored in any malloc\'d block.</p>' },
+        { type: 'info', variant: 'warning', title: 'Coalescing Limitation',
+          html: '<p>Our <code>free()</code> only coalesces <strong>forward</strong>: it merges a free block with the next block if both are free. But it cannot merge <em>backward</em> — if you free block B and block A (before it) is also free, they will not be merged because we have no pointer from B back to A. This causes fragmentation over time. The fix is a <strong>doubly-linked free list</strong>: add a <code>prev</code> pointer to each block header so you can check and merge in both directions. Another classic approach is <em>boundary tags</em> — store the block size at both the beginning and end of each block, so you can find the previous block in O(1) without an explicit back pointer.</p>' },
         { type: 'text', html: `
 <h3>Minimal libc Functions</h3>
 <p>Beyond malloc, C programs need basic library functions. Here are the essential ones:</p>` },
@@ -1146,6 +1524,8 @@ int printf(const char *fmt, ...) {
     va_end(args);
     return count;
 }` },
+        { type: 'info', variant: 'info', title: 'How va_list and va_arg Work on ARM',
+          html: '<p>On ARM, the first four arguments to any function are passed in registers R0-R3. For a variadic function like <code>printf(const char *fmt, ...)</code>, R0 holds <code>fmt</code> and R1-R3 hold the first three variadic arguments. Any additional variadic arguments are passed on the stack. The function prologue saves R1-R3 to the stack so that all variadic arguments are in a contiguous memory region. <code>va_list</code> is simply a pointer into this region. <code>va_start(args, fmt)</code> sets <code>args</code> to point just past the last named parameter. Each call to <code>va_arg(args, type)</code> reads <code>sizeof(type)</code> bytes from the current pointer and advances it. This is why variadic functions have no type safety — the function trusts the format string to correctly describe the types on the stack.</p>' },
         { type: 'video', id: 'HPDBOhiKaD8', title: 'Dynamic Memory Allocation — Jacob Sorber' },
         { type: 'video', id: '74s0m4YoHgM', title: 'How Does malloc Work? (Low Level Learning)' },
         { type: 'practice', title: 'Practice Exercises', items: [
@@ -1166,8 +1546,8 @@ int printf(const char *fmt, ...) {
     {
       id: 6,
       title: "Ethernet Controller in Verilog",
-      subtitle: "Networking hardware for connecting to the world",
-      duration: "2 hours",
+      subtitle: "Ethernet frame format, MII interface, and MAC design",
+      duration: "2 hrs",
       content: [
         { type: 'text', html: `
 <h2>Ethernet Fundamentals</h2>
@@ -1276,8 +1656,236 @@ Maximum frame size: 1518 bytes (without VLAN tag)` },
 
     assign crc_out = ~crc;  // Final XOR
 endmodule` },
+        { type: 'text', html: `<h3>MAC Transmitter State Machine</h3>
+<p>The MAC transmitter is a state machine that takes a frame from a buffer and drives the MII signals (TXD and TX_EN) to the PHY. It walks through these states: IDLE (waiting), PREAMBLE (7 bytes of 0x55), SFD (0xD5 start delimiter), DATA (frame bytes as nibbles while feeding the CRC engine), FCS (4 CRC bytes), and IFG (inter-frame gap, 96 bit times of silence):</p>` },
+        { type: 'code', label: 'mac_tx.v — Ethernet MAC transmitter', code: `module mac_tx (
+    input  wire        clk,         // TX_CLK from PHY (25 MHz for 100 Mbps)
+    input  wire        reset,
+    // CPU interface
+    input  wire        tx_start,    // Pulse high to begin transmission
+    input  wire [7:0]  tx_data,     // Byte from frame buffer
+    input  wire [10:0] tx_len,      // Frame length in bytes (excl. preamble/SFD/FCS)
+    output reg         tx_busy,     // High while transmitting
+    output reg  [10:0] tx_byte_addr,// Address into frame buffer
+    // MII interface to PHY
+    output reg  [3:0]  txd,         // Transmit data (nibble)
+    output reg         tx_en        // Transmit enable
+);
+
+    localparam IDLE     = 3'd0;
+    localparam PREAMBLE = 3'd1;
+    localparam SFD      = 3'd2;
+    localparam DATA     = 3'd3;
+    localparam FCS      = 3'd4;
+    localparam IFG      = 3'd5;
+
+    reg [2:0]  state;
+    reg [4:0]  preamble_cnt;   // Count 14 nibbles (7 bytes of 0x55)
+    reg        nibble_sel;     // 0 = low nibble, 1 = high nibble
+    reg [10:0] byte_cnt;
+    reg [4:0]  ifg_cnt;
+    reg [2:0]  fcs_nibble_cnt; // 8 nibbles of FCS (4 bytes)
+
+    // CRC-32 instance
+    wire [31:0] crc_out;
+    reg         crc_reset, crc_enable;
+    reg  [3:0]  crc_data;
+
+    crc32 crc_inst (
+        .clk(clk), .reset(crc_reset),
+        .enable(crc_enable), .data_in(crc_data),
+        .crc_out(crc_out)
+    );
+
+    always @(posedge clk) begin
+        if (reset) begin
+            state    <= IDLE;
+            tx_en    <= 0;
+            tx_busy  <= 0;
+            txd      <= 4'h0;
+        end else begin
+            case (state)
+                IDLE: begin
+                    tx_en <= 0;
+                    tx_busy <= 0;
+                    if (tx_start) begin
+                        state <= PREAMBLE;
+                        preamble_cnt <= 0;
+                        tx_busy <= 1;
+                        crc_reset <= 1;
+                    end
+                end
+
+                PREAMBLE: begin
+                    tx_en <= 1;
+                    txd <= 4'b0101;       // Preamble nibble: 0101
+                    crc_reset <= 0;
+                    preamble_cnt <= preamble_cnt + 1;
+                    if (preamble_cnt == 14)
+                        state <= SFD;
+                end
+
+                SFD: begin
+                    if (!nibble_sel) begin
+                        txd <= 4'b0101;   // SFD low nibble
+                        nibble_sel <= 1;
+                    end else begin
+                        txd <= 4'b1101;   // SFD high nibble (0xD5)
+                        nibble_sel <= 0;
+                        byte_cnt <= 0;
+                        tx_byte_addr <= 0;
+                        state <= DATA;
+                    end
+                end
+
+                DATA: begin
+                    if (!nibble_sel) begin
+                        txd <= tx_data[3:0];       // Low nibble first
+                        crc_data <= tx_data[3:0];
+                        crc_enable <= 1;
+                        nibble_sel <= 1;
+                    end else begin
+                        txd <= tx_data[7:4];       // High nibble
+                        crc_data <= tx_data[7:4];
+                        nibble_sel <= 0;
+                        byte_cnt <= byte_cnt + 1;
+                        tx_byte_addr <= tx_byte_addr + 1;
+                        if (byte_cnt + 1 == tx_len) begin
+                            state <= FCS;
+                            fcs_nibble_cnt <= 0;
+                            crc_enable <= 0;
+                        end
+                    end
+                end
+
+                FCS: begin
+                    crc_enable <= 0;
+                    txd <= crc_out[fcs_nibble_cnt*4 +: 4];
+                    fcs_nibble_cnt <= fcs_nibble_cnt + 1;
+                    if (fcs_nibble_cnt == 7) begin
+                        state <= IFG;
+                        ifg_cnt <= 0;
+                    end
+                end
+
+                IFG: begin
+                    tx_en <= 0;
+                    txd <= 4'h0;
+                    ifg_cnt <= ifg_cnt + 1;
+                    if (ifg_cnt == 23)    // 96 bit times = 24 nibble clocks
+                        state <= IDLE;
+                end
+            endcase
+        end
+    end
+endmodule` },
+        { type: 'text', html: `<h3>IP Header Format</h3>
+<p>Inside the Ethernet payload, an IP packet begins with a 20-byte header (no options). You need to construct this correctly for every packet you send:</p>` },
+        { type: 'table', headers: ['Offset', 'Size', 'Field', 'Typical Value'],
+          rows: [
+            ['0', '4 bits', 'Version', '4 (IPv4)'],
+            ['0', '4 bits', 'IHL (header length)', '5 (= 20 bytes, no options)'],
+            ['1', '1 byte', 'DSCP / ECN', '0x00'],
+            ['2', '2 bytes', 'Total Length', 'Header + payload in bytes'],
+            ['4', '2 bytes', 'Identification', 'Unique packet ID (for fragmentation)'],
+            ['6', '2 bytes', 'Flags + Fragment Offset', '0x4000 (Don\'t Fragment)'],
+            ['8', '1 byte', 'TTL (Time to Live)', '64 (decremented by each router)'],
+            ['9', '1 byte', 'Protocol', '17 = UDP, 6 = TCP, 1 = ICMP'],
+            ['10', '2 bytes', 'Header Checksum', 'One\'s complement sum of header words'],
+            ['12', '4 bytes', 'Source IP Address', 'e.g., 192.168.1.100'],
+            ['16', '4 bytes', 'Destination IP Address', 'e.g., 192.168.1.1'],
+          ]
+        },
+        { type: 'text', html: `<h3>ARP: Address Resolution Protocol</h3>
+<p>Before your system can send an IP packet to a device on the local network, it needs to know the destination's <strong>MAC address</strong>. IP addresses are logical (layer 3), but Ethernet frames need physical MAC addresses (layer 2). ARP bridges this gap.</p>
+<p><strong>How ARP works:</strong></p>
+<ol>
+<li>Your system wants to reach IP 192.168.1.1 but does not know its MAC address.</li>
+<li>It broadcasts an <strong>ARP Request</strong> (destination MAC = FF:FF:FF:FF:FF:FF): "Who has 192.168.1.1? Tell 192.168.1.100 at AA:BB:CC:DD:EE:01."</li>
+<li>The device at 192.168.1.1 responds with a unicast <strong>ARP Reply</strong>: "192.168.1.1 is at AA:BB:CC:DD:EE:02."</li>
+<li>Your system caches this IP-to-MAC mapping in an <strong>ARP table</strong> and can now address Ethernet frames directly.</li>
+</ol>
+<p>An ARP packet is 28 bytes (for IPv4/Ethernet) with EtherType 0x0806. Fields: hardware type (1 = Ethernet), protocol type (0x0800 = IPv4), hardware address length (6), protocol address length (4), operation (1 = request, 2 = reply), sender hardware/protocol address, and target hardware/protocol address. For your Ethernet controller, implement a minimal ARP responder: when a request arrives for your IP, reply with your MAC. Without this, no other device can discover you on the network.</p>` },
+        { type: 'code', label: 'crc32_tb.v — Testbench with known test vectors', code: `\`timescale 1ns / 1ps
+
+module crc32_tb;
+    reg        clk;
+    reg        reset;
+    reg        enable;
+    reg  [3:0] data_in;
+    wire [31:0] crc_out;
+
+    crc32 uut (
+        .clk(clk), .reset(reset),
+        .enable(enable), .data_in(data_in),
+        .crc_out(crc_out)
+    );
+
+    // 25 MHz clock (40ns period)
+    always #20 clk = ~clk;
+
+    // Feed one byte as two nibbles (low nibble first per Ethernet order)
+    task feed_byte(input [7:0] b);
+        begin
+            @(posedge clk);
+            data_in <= b[3:0];   // Low nibble first
+            enable  <= 1;
+            @(posedge clk);
+            data_in <= b[7:4];   // High nibble
+        end
+    endtask
+
+    integer pass_count;
+    integer fail_count;
+
+    initial begin
+        clk = 0; reset = 1; enable = 0; data_in = 0;
+        pass_count = 0; fail_count = 0;
+
+        @(posedge clk); @(posedge clk);
+        reset = 0;
+
+        // --- Test 1: CRC-32 of "123456789" ---
+        // Expected: 0xCBF43926 (IEEE 802.3 check value)
+        feed_byte(8'h31);  // '1'
+        feed_byte(8'h32);  // '2'
+        feed_byte(8'h33);  // '3'
+        feed_byte(8'h34);  // '4'
+        feed_byte(8'h35);  // '5'
+        feed_byte(8'h36);  // '6'
+        feed_byte(8'h37);  // '7'
+        feed_byte(8'h38);  // '8'
+        feed_byte(8'h39);  // '9'
+        @(posedge clk); enable <= 0; @(posedge clk);
+
+        if (crc_out == 32'hCBF43926) begin
+            $display("PASS: test1 CRC=0x%08X", crc_out);
+            pass_count = pass_count + 1;
+        end else begin
+            $display("FAIL: test1 CRC=0x%08X (expected CBF43926)", crc_out);
+            fail_count = fail_count + 1;
+        end
+
+        // --- Test 2: Single byte 0x00 ---
+        // Expected: 0xD202EF8D
+        reset = 1; @(posedge clk); reset = 0;
+        feed_byte(8'h00);
+        @(posedge clk); enable <= 0; @(posedge clk);
+
+        if (crc_out == 32'hD202EF8D) begin
+            $display("PASS: test2 CRC=0x%08X", crc_out);
+            pass_count = pass_count + 1;
+        end else begin
+            $display("FAIL: test2 CRC=0x%08X (expected D202EF8D)", crc_out);
+            fail_count = fail_count + 1;
+        end
+
+        $display("Results: %0d passed, %0d failed", pass_count, fail_count);
+        $finish;
+    end
+endmodule` },
         { type: 'text', html: `<h3>UDP Protocol</h3>
-<p>For our network bootloader, we'll use <strong>UDP</strong> (User Datagram Protocol) — the simplest transport protocol. It adds source/destination ports and a length/checksum to IP packets, with no connection setup or reliability guarantees.</p>` },
+<p>For our network bootloader, we will use <strong>UDP</strong> (User Datagram Protocol) — the simplest transport protocol. It adds source/destination ports and a length/checksum to IP packets, with no connection setup or reliability guarantees.</p>` },
         { type: 'diagram', content: `
 UDP Packet inside Ethernet:
 

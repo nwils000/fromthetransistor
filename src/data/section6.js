@@ -366,7 +366,7 @@ static void tcp_send_segment(struct tcp_connection *conn,
         memcpy(packet + 40, data, data_len);
     }
 
-    /* TODO: compute TCP checksum with pseudo-header */
+    /* Compute TCP checksum using the pseudo-header */
     tcp->checksum = tcp_checksum(ip, tcp, data, data_len);
 
     /* Build IP header wrapping the TCP segment */
@@ -444,6 +444,82 @@ void tcp_input(struct tcp_connection *conn,
     default:
         break;
     }
+}` },
+        { type: 'text', html: `
+<h4>The TCP Pseudo-Header Checksum</h4>
+<p>The TCP checksum is more involved than the IP checksum. TCP includes a <strong>pseudo-header</strong> in its checksum calculation: the source IP, destination IP, a zero byte, the protocol number (6 for TCP), and the TCP segment length. This pseudo-header is not transmitted on the wire — it exists only for checksum purposes.</p>
+
+<p>Why does the pseudo-header exist? Because the TCP header itself does not contain IP addresses. Without the pseudo-header, a segment could be delivered to the wrong host or wrong protocol, and the TCP checksum alone would not catch the error. By including the IP addresses and protocol number in the checksum, TCP can detect segments that were misdelivered by the IP layer — for example, a corrupted destination address that causes a packet to arrive at the wrong machine.</p>
+` },
+        { type: 'code', label: 'tcp_checksum.c — TCP checksum with pseudo-header', code: `/*
+ * TCP pseudo-header (RFC 793): used ONLY for checksum calculation,
+ * never transmitted on the wire.
+ *
+ *   +--------+--------+--------+--------+
+ *   |           Source Address            |
+ *   +--------+--------+--------+--------+
+ *   |         Destination Address         |
+ *   +--------+--------+--------+--------+
+ *   |  zero  |  PTCL  |    TCP Length    |
+ *   +--------+--------+--------+--------+
+ *
+ * TCP Length = TCP header length + data length (in bytes)
+ */
+struct tcp_pseudo_header {
+    uint32_t src_addr;
+    uint32_t dst_addr;
+    uint8_t  zero;
+    uint8_t  protocol;    /* always 6 for TCP */
+    uint16_t tcp_length;  /* TCP header + payload */
+} __attribute__((packed));
+
+/*
+ * Compute the TCP checksum over pseudo-header + TCP header + data.
+ * The checksum is the one's complement of the one's complement sum
+ * of all 16-bit words.
+ */
+uint16_t tcp_checksum(const struct ip_header *ip,
+                      const struct tcp_header *tcp,
+                      const uint8_t *data, uint16_t data_len)
+{
+    uint16_t tcp_hdr_len = (tcp->data_offset >> 4) * 4;
+    uint16_t tcp_total   = tcp_hdr_len + data_len;
+
+    /* Build the pseudo-header */
+    struct tcp_pseudo_header pseudo;
+    pseudo.src_addr   = ip->src_addr;   /* already in network byte order */
+    pseudo.dst_addr   = ip->dst_addr;
+    pseudo.zero       = 0;
+    pseudo.protocol   = IP_PROTO_TCP;   /* 6 */
+    pseudo.tcp_length = htons(tcp_total);
+
+    /* Sum the pseudo-header */
+    uint32_t sum = 0;
+    const uint16_t *w = (const uint16_t *)&pseudo;
+    for (int i = 0; i < (int)sizeof(pseudo) / 2; i++)
+        sum += w[i];
+
+    /* Sum the TCP header (with checksum field set to 0) */
+    w = (const uint16_t *)tcp;
+    for (int i = 0; i < tcp_hdr_len / 2; i++)
+        sum += w[i];
+
+    /* Sum the payload data */
+    w = (const uint16_t *)data;
+    int remaining = data_len;
+    while (remaining > 1) {
+        sum += *w++;
+        remaining -= 2;
+    }
+    /* If data length is odd, pad with a zero byte */
+    if (remaining == 1)
+        sum += *(const uint8_t *)w;
+
+    /* Fold 32-bit sum into 16 bits */
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+
+    return (uint16_t)(~sum);
 }` },
         { type: 'text', html: `
 <h4>The TCP State Machine</h4>
@@ -639,6 +715,57 @@ void tcp_close(struct tcp_connection *conn)
         tcp_send_segment(conn, TCP_FIN | TCP_ACK, NULL, 0);
     }
 }` },
+        { type: 'text', html: `
+<h4>Getting Packets onto the Wire</h4>
+<p>Our code builds IP and TCP headers in a byte buffer, but how does that buffer actually reach the network? In a real operating system, user-space programs cannot touch the network hardware directly — the kernel mediates all access. There are two common approaches for a user-space TCP/IP stack:</p>
+
+<p><strong>Raw sockets</strong> (<code>socket(AF_INET, SOCK_RAW, IPPROTO_RAW)</code>) let you send hand-crafted IP packets directly. The kernel skips its own IP/TCP processing and hands your bytes to the network driver. This requires root privileges and works well for testing, but you are still using the kernel's Ethernet layer.</p>
+
+<p><strong>TAP/TUN devices</strong> are virtual network interfaces. A TUN device operates at the IP layer (you read/write IP packets), while a TAP device operates at the Ethernet layer (you read/write full Ethernet frames including MAC headers). User-space TCP/IP stacks like lwIP and tapip use TAP devices so they control every byte from Ethernet up. You open <code>/dev/net/tun</code>, configure it with <code>ioctl()</code>, and then <code>read()</code>/<code>write()</code> complete frames.</p>
+` },
+        { type: 'code', label: 'net_send_packet — Stub for sending raw packets', code: `/*
+ * Send a fully constructed packet (IP header + payload) out to the
+ * network. This is platform-specific — here are the two main approaches:
+ */
+
+/* Option 1: Raw socket (simplest, requires root) */
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+static int raw_sock = -1;
+
+void net_init_raw_socket(void) {
+    raw_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    if (raw_sock < 0) {
+        perror("socket(SOCK_RAW) — need root privileges");
+    }
+    /* Tell kernel we provide our own IP header */
+    int one = 1;
+    setsockopt(raw_sock, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one));
+}
+
+void net_send_packet(const uint8_t *packet, int length) {
+    /* Extract destination IP from the IP header we built */
+    struct ip_header *ip = (struct ip_header *)packet;
+    struct sockaddr_in dst;
+    dst.sin_family = AF_INET;
+    dst.sin_addr.s_addr = ip->dst_addr;  /* already in network order */
+
+    sendto(raw_sock, packet, length, 0,
+           (struct sockaddr *)&dst, sizeof(dst));
+}
+
+/* Option 2: TUN/TAP device (for a full user-space stack)
+ *
+ *   int tun_fd = open("/dev/net/tun", O_RDWR);
+ *   struct ifreq ifr = { .ifr_flags = IFF_TUN | IFF_NO_PI };
+ *   strncpy(ifr.ifr_name, "tun0", IFNAMSIZ);
+ *   ioctl(tun_fd, TUNSETIFF, &ifr);
+ *
+ *   // Now read/write IP packets via tun_fd:
+ *   write(tun_fd, packet, length);   // send
+ *   read(tun_fd, buffer, bufsize);   // receive
+ */` },
         { type: 'info', variant: 'warning', title: 'This Is a Simplified Implementation',
           html: `<p>A production TCP stack handles many more edge cases: out-of-order segments, retransmission timers, congestion control (slow start, congestion avoidance), Nagle's algorithm, silly window syndrome, SACK, timestamps, and more. Our implementation covers the core concepts. For the full specification, read <strong>RFC 793</strong> (original TCP) and <strong>RFC 7414</strong> (roadmap to TCP RFCs).</p>` },
         { type: 'video', id: 'F27PLin3TV0', title: 'TCP/IP Explained — the fundamentals of networking' },
@@ -896,6 +1023,27 @@ Process Architecture of the Telnet Server
   - Line editing, signal handling, job control all work correctly
   - Without a PTY, programs like 'vi' or 'top' would break` },
         { type: 'text', html: `
+<h3>Key System Calls Explained</h3>
+
+<h4>select() — Waiting on Multiple File Descriptors</h4>
+<p>The <code>select()</code> system call lets a process wait for activity on multiple file descriptors simultaneously — without busy-looping. In our telnet server, the child process needs to watch two file descriptors at once: the client socket (for incoming keystrokes from the network) and the pty master (for output from the shell). Without <code>select()</code>, you would need two threads, one blocking on each <code>read()</code>. With <code>select()</code>, a single thread can wait for whichever becomes ready first.</p>
+
+<p>The function signature is: <code>int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)</code>. The <code>fd_set</code> type is a bitmask representing a set of file descriptors. You manipulate it with macros: <code>FD_ZERO()</code> clears the set, <code>FD_SET(fd, &set)</code> adds a descriptor, and <code>FD_ISSET(fd, &set)</code> checks if a descriptor is ready after <code>select()</code> returns. The first argument <code>nfds</code> must be set to the highest-numbered file descriptor plus one — this tells the kernel how many bits in the bitmask to scan. Passing <code>maxfd + 1</code> is a common idiom. When <code>select()</code> returns, the fd_sets are modified in place to indicate which descriptors are ready.</p>
+
+<h4>forkpty() — Creating a Pseudo-Terminal and Forking</h4>
+<p><code>forkpty()</code> combines three operations into one call: it creates a pseudo-terminal pair (master and slave), calls <code>fork()</code>, and connects the child process's stdin/stdout/stderr to the slave side of the pseudo-terminal. The signature is: <code>pid_t forkpty(int *amaster, char *name, struct termios *termp, struct winsize *winp)</code>. The first parameter <code>amaster</code> receives the file descriptor for the master side of the pty. The second parameter <code>name</code>, if non-NULL, receives the filename of the slave device (e.g., <code>/dev/pts/3</code>). The third and fourth parameters set terminal attributes and window size for the slave — passing NULL for both uses defaults.</p>
+
+<p>The return value follows fork() semantics: in the parent, it returns the child's PID (positive); in the child, it returns 0; on error, it returns -1. The parent reads from and writes to the master fd, and those bytes appear as terminal I/O in the child. This is what makes the shell believe it is running in a real terminal, enabling features like line editing and cursor control.</p>
+
+<h4>Platform Note: Header File Differences</h4>
+<p>The <code>forkpty()</code> function lives in different headers on different systems. On Linux, you include <code>&lt;pty.h&gt;</code> and link with <code>-lutil</code>. On macOS (and other BSD systems), you include <code>&lt;util.h&gt;</code> instead — there is no <code>&lt;pty.h&gt;</code> and no need to link <code>-lutil</code> because the function is part of the standard C library. If you need portability, use a preprocessor check:</p>
+` },
+        { type: 'code', label: 'Portable forkpty() include', code: `#ifdef __APPLE__
+  #include <util.h>       /* macOS / BSD: forkpty() lives here */
+#else
+  #include <pty.h>        /* Linux: forkpty() lives here       */
+#endif` },
+        { type: 'text', html: `
 <h3>Testing Your Telnet Server</h3>
 <p>Compile and run the server, then connect to it from another terminal:</p>
 ` },
@@ -932,7 +1080,6 @@ $ echo "Hello from telnet!"
 </ol>
 <p>This "fork after accept" pattern is one of the oldest concurrent server designs in Unix. It's simple, robust, and how servers worked for decades before threads and event loops became popular.</p>
 ` },
-        { type: 'video', id: 'dFpIq8zMj0s', title: 'Unix Socket Programming in C — Jacob Sorber' },
         { type: 'practice', title: 'Practice Exercises', items: [
           'Build and run the telnet server. Connect two clients simultaneously and verify they each get independent shells.',
           'Add a login prompt: before spawning a shell, ask for a username and password (hardcoded is fine — this is for learning, not security)',
@@ -1314,6 +1461,8 @@ The blank line (just \\r\\n) marks the end of headers.` },
           ]
         },
         { type: 'text', html: `
+<p>The "Idempotent?" column is an important concept: an <strong>idempotent</strong> request is one that produces the same result whether you send it once or multiple times. GET is idempotent — requesting the same page ten times gives you the same page, with no side effects on the server. POST is not idempotent — submitting an order form ten times creates ten orders. This distinction matters for retries: if a network error occurs, the client can safely retry an idempotent request, but retrying a non-idempotent POST might duplicate the action.</p>
+
 <h3>Anatomy of an HTTP Response</h3>
 ` },
         { type: 'diagram', content: `
@@ -1410,6 +1559,12 @@ Complete Flow of an HTTP Request
      ACK ------------------------------------------>
 
   8. Parse HTML and Render                            Done.` },
+        { type: 'text', html: `
+<h3>DNS: Translating Hostnames to IP Addresses</h3>
+<p>Before a browser can open a TCP connection, it needs the server's IP address. But humans use hostnames like <code>www.example.com</code>, not numbers like <code>93.184.216.34</code>. The <strong>Domain Name System (DNS)</strong> is the distributed database that maps hostnames to IP addresses. It works like a phone book for the Internet: your computer asks a DNS resolver "what is the IP address of www.example.com?", and the resolver queries a hierarchy of DNS servers (root servers, TLD servers, authoritative servers) until it gets an answer.</p>
+
+<p>In C, the traditional function for DNS lookup is <code>gethostbyname()</code>: you pass it a hostname string, and it returns a <code>struct hostent</code> containing the IP address(es) for that host. Our HTTP client uses this function. However, <code>gethostbyname()</code> is considered obsolete because it only supports IPv4 and is not thread-safe (it returns a pointer to a static buffer). The modern replacement is <code>getaddrinfo()</code>, which supports both IPv4 and IPv6, is thread-safe, and can resolve both hostnames and service names (like "http" to port 80) in one call. For new code, always prefer <code>getaddrinfo()</code>.</p>
+` },
         { type: 'text', html: `
 <h3>Building an HTTP Client in C</h3>
 <p>Let's implement a minimal HTTP client from scratch. This is what our text-based browser will use internally:</p>
@@ -1598,6 +1753,36 @@ int main(int argc, char *argv[]) {
             ['<code>Transfer-Encoding</code>', 'Response', '"chunked" means body is sent in pieces with size prefixes'],
           ]
         },
+        { type: 'text', html: `
+<h4>Virtual Hosting and the Host Header</h4>
+<p><strong>Virtual hosting</strong> allows a single server (one IP address) to host multiple websites. When a request arrives, the server looks at the <code>Host</code> header to determine which site the client wants. This is why <code>Host</code> is mandatory in HTTP/1.1 — without it, a server at 93.184.216.34 would not know whether you want <code>example.com</code> or <code>example.org</code>, even though both resolve to the same IP. Before HTTP/1.1, every website needed its own IP address, which accelerated the exhaustion of the IPv4 address space.</p>
+
+<h4>MIME Types (Content-Type)</h4>
+<p>The <code>Content-Type</code> header uses <strong>MIME types</strong> (Multipurpose Internet Mail Extensions) to describe the format of the body. A MIME type has two parts: a type and a subtype, separated by a slash. Common examples: <code>text/html</code> for web pages, <code>text/plain</code> for plain text, <code>application/json</code> for JSON data, <code>image/png</code> for PNG images. The browser uses the MIME type to decide how to handle the response — render HTML, display an image, download a file, etc. Servers determine the MIME type from the file extension (e.g., <code>.html</code> maps to <code>text/html</code>).</p>
+
+<h4>Chunked Transfer Encoding</h4>
+<p>When a server does not know the total size of the response body in advance (for example, when generating content dynamically), it cannot set a <code>Content-Length</code> header. Instead, it uses <code>Transfer-Encoding: chunked</code>, which sends the body in a series of chunks. Each chunk starts with the chunk size in hexadecimal on its own line, followed by a CRLF, then that many bytes of data, followed by another CRLF. The stream ends with a zero-length chunk (<code>0\\r\\n\\r\\n</code>). For example:</p>
+` },
+        { type: 'diagram', content: `
+Chunked Transfer Encoding Format
+===================================
+
+  HTTP/1.1 200 OK\\r\\n
+  Transfer-Encoding: chunked\\r\\n
+  \\r\\n
+  1a\\r\\n                          <-- hex size: 26 bytes
+  This is the first chunk.\\r\\n   <-- 26 bytes of data
+  10\\r\\n                          <-- hex size: 16 bytes
+  Second chunk!!!\\r\\n             <-- 16 bytes of data
+  0\\r\\n                           <-- zero-length chunk = END
+  \\r\\n                            <-- final CRLF
+
+To read chunked data:
+  1. Read a line, parse the hex number -> that is the chunk size
+  2. Read exactly that many bytes -> that is the chunk data
+  3. Read the trailing \\r\\n after the chunk data
+  4. If chunk size was 0, the body is complete
+  5. Otherwise, go back to step 1` },
         { type: 'info', variant: 'info', title: 'HTTP/1.0 vs HTTP/1.1 vs HTTP/2',
           html: `<p><strong>HTTP/1.0:</strong> One request per TCP connection. Open, request, response, close. Wasteful.</p>
 <p><strong>HTTP/1.1:</strong> Added persistent connections (keep-alive), chunked transfer encoding, the Host header (virtual hosting), and more. This is what we implement.</p>
@@ -1682,6 +1867,28 @@ Our parser strategy:
   4. Apply formatting based on tag type
   5. When we see '>', switch back to text mode
   6. Collect text content and output with formatting` },
+        { type: 'text', html: `
+<h3>Architecture of the HTML Parser</h3>
+<p>Our parser is a single-pass, character-by-character state machine. As it scans the HTML input, it is always in one of three modes:</p>
+
+<p><strong>Text mode</strong> is the default. The parser reads printable characters and emits them to the terminal. Whitespace is collapsed: multiple spaces, tabs, and newlines in the HTML source are reduced to a single space in the output (just like a real browser). This continues until the parser sees <code>&lt;</code> (which switches to tag mode) or <code>&amp;</code> (which switches to entity mode). The <code>skip</code> flag in the render state suppresses output when we are inside <code>&lt;script&gt;</code> or <code>&lt;style&gt;</code> blocks.</p>
+
+<p><strong>Tag mode</strong> activates when the parser encounters a <code>&lt;</code> character. It reads everything up to the closing <code>&gt;</code> into a buffer, then passes the tag content to the <code>process_tag()</code> function. This function extracts the tag name (converting to lowercase for case-insensitive matching), checks whether it is an opening or closing tag (by looking for a leading <code>/</code>), and dispatches based on the tag name. Block elements like <code>&lt;p&gt;</code>, <code>&lt;div&gt;</code>, and headings call <code>block_break()</code> to insert a blank line. Inline elements like <code>&lt;b&gt;</code> and <code>&lt;i&gt;</code> toggle terminal formatting codes. The <code>&lt;a&gt;</code> tag extracts the <code>href</code> attribute, tracks the link text, and assigns a link number. The distinction between block and inline is the same as in CSS: block elements start on a new line, inline elements flow within the current line.</p>
+
+<p><strong>Entity mode</strong> activates when the parser encounters an <code>&amp;</code> character. HTML entities are sequences like <code>&amp;amp;</code>, <code>&amp;lt;</code>, and <code>&amp;quot;</code> that represent characters which have special meaning in HTML (see below). The <code>decode_entity()</code> function checks for known entities and returns the decoded character. If the entity is not recognized, the literal <code>&amp;</code> is emitted.</p>
+
+<p>The <code>render_state</code> struct tracks everything the parser needs to know about its current context: the column position (for word wrapping at <code>TERM_WIDTH</code>), which formatting flags are active (bold, italic, link), whether we are in a skipped region, and buffers for collecting the page title and link text. This design keeps the parser stateless across characters — all state is explicit in the struct.</p>
+` },
+        { type: 'text', html: `
+<h3>ANSI Terminal Escape Codes</h3>
+<p>Our browser renders formatted text using <strong>ANSI escape codes</strong> — special byte sequences that terminals interpret as formatting instructions rather than displayable characters. Every escape sequence starts with <code>ESC[</code> (hex <code>0x1B5B</code>, or in C string notation <code>\\\\033[</code>), followed by a numeric code and a letter. For example, <code>\\\\033[1m</code> turns on bold text: the terminal reads the escape byte (0x1B), the opening bracket, the number 1 (which means "bold"), and the letter <code>m</code> (which means "set graphics mode"). All text printed after that will appear bold until a reset code is sent.</p>
+
+<p>The codes used in our browser are: <code>\\\\033[1m</code> for bold on, <code>\\\\033[22m</code> for bold off, <code>\\\\033[4m</code> for underline on (used for italic text, since most terminals do not support true italics), <code>\\\\033[24m</code> for underline off, <code>\\\\033[36m</code> for cyan foreground color (used for links), and <code>\\\\033[0m</code> to reset all formatting to defaults. These codes work in virtually all modern terminal emulators (xterm, iTerm2, GNOME Terminal, Windows Terminal). The terminal intercepts these byte sequences before rendering — they consume no visible column space on screen.</p>
+` },
+        { type: 'text', html: `
+<h3>HTML Entities</h3>
+<p>HTML uses certain characters as markup syntax — <code>&lt;</code> starts a tag, <code>&gt;</code> ends a tag, <code>&amp;</code> begins an entity reference, and <code>&quot;</code> delimits attribute values. When you need these characters to appear as literal text in a web page, you must <strong>escape</strong> them using HTML entities: <code>&amp;lt;</code> for &lt;, <code>&amp;gt;</code> for &gt;, <code>&amp;amp;</code> for &amp;, and <code>&amp;quot;</code> for &quot;. There are also entities for non-keyboard characters like <code>&amp;nbsp;</code> (non-breaking space) and <code>&amp;copy;</code> (copyright symbol). Our parser handles the five most common entities; a full browser would decode hundreds of named entities plus numeric references like <code>&amp;#169;</code>.</p>
+` },
         { type: 'code', label: 'html_parser.c — A minimal HTML parser and renderer', code: `#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2198,6 +2405,10 @@ The Complete Stack We Built
   you now understand every layer of the computing stack.
 
   This is what "From the Transistor" means.` },
+        { type: 'info', variant: 'warning', title: 'HTTP-Only Limitation',
+          html: `<p>Our browser only supports plain HTTP — it cannot fetch HTTPS URLs, and the vast majority of websites today require HTTPS. If you try to load an HTTPS site, the connection will fail or return garbage because our client sends plaintext to a port expecting a TLS handshake. For testing and development, the easiest workaround is to run a local HTTP server. Python makes this trivial:</p>
+<p><code>python3 -m http.server 8080</code></p>
+<p>This serves files from the current directory on <code>http://localhost:8080</code>. Create some HTML files and point MiniBrowser at them: <code>./minibrowser http://localhost:8080/test.html</code>. You can also fetch <code>http://example.com/</code> — it is one of the few sites that still accepts plain HTTP. Adding HTTPS support requires integrating a TLS library like OpenSSL or mbedTLS, which is a significant but worthwhile exercise listed below.</p>` },
         { type: 'info', variant: 'tip', title: 'Extending the Browser',
           html: `<p>Our browser is minimal but fully functional. Here are ways to extend it for deeper learning:</p>
 <ul>
@@ -2209,7 +2420,6 @@ The Complete Stack We Built
 <li><strong>Bookmarks:</strong> Save and load favorite URLs from a file.</li>
 <li><strong>Caching:</strong> Store fetched pages locally, respect Cache-Control headers.</li>
 </ul>` },
-        { type: 'video', id: 'PzzNuCk2e1s', title: 'Browser Networking 101 — Web Performance with Ilya Grigorik' },
         { type: 'video', id: 'brhuVn91EdY', title: 'How Browsers Work — JSConf EU' },
         { type: 'practice', title: 'Practice Exercises', items: [
           'Build and run the complete MiniBrowser. Fetch http://example.com/ and navigate using link numbers.',

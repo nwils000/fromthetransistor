@@ -411,6 +411,136 @@ int main(int argc, char **argv) {
 }`,
         },
         {
+          type: "text",
+          html: `
+<h3>JTAG is LSB-First: Why the Bit Indexing Looks That Way</h3>
+
+<p>JTAG shifts data <strong>least-significant bit first</strong> (LSB-first).
+When you load an 8-bit instruction like <code>0x26</code> (binary
+<code>00100110</code>), bit 0 (the &lsquo;0&rsquo; on the right) goes out on
+TDI first, then bit 1, and so on up to bit 7.</p>
+
+<p>This is why the bit-bang code accesses bits with the expression
+<code>(data_in[i/8] &gt;&gt; (i%8)) &amp; 1</code>:</p>
+
+<ul>
+  <li><code>i/8</code> selects the correct <em>byte</em> from the data buffer
+      (byte 0 first, then byte 1, etc.).</li>
+  <li><code>i%8</code> selects the correct <em>bit within that byte</em>,
+      starting from bit 0 (the least significant bit).</li>
+  <li>The right-shift and mask (<code>&gt;&gt;</code> and <code>&amp; 1</code>)
+      extract that single bit.</li>
+</ul>
+
+<p>So for byte <code>0x26 = 0b00100110</code>, the bits go out on TDI in
+order: 0, 1, 1, 0, 0, 1, 0, 0. The receiver&rsquo;s shift register fills from
+LSB to MSB, reconstructing the original value. This LSB-first convention is
+mandated by IEEE 1149.1 and ensures that the first bit shifted in ends up in
+bit position 0 of the instruction or data register.</p>
+
+<p>A practical consequence: if you capture JTAG traffic on a logic analyzer,
+the bits appear to arrive &ldquo;backwards&rdquo; compared to how you would
+normally write the hex value. Keep this in mind when debugging.</p>
+`,
+        },
+        {
+          type: "code",
+          label: "FTDI FT232H initialization using libftdi (concrete setup snippet)",
+          code: `// ftdi_jtag_init.c -- Initialize an FTDI FT232H for JTAG bit-banging
+// Requires: libftdi1-dev (apt install libftdi1-dev)
+// Compile: gcc -o ftdi_jtag_init ftdi_jtag_init.c -lftdi1
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <ftdi.h>
+
+// FT232H pin mapping on ADBUS:
+//   ADBUS0 = TCK (output)
+//   ADBUS1 = TDI (output)
+//   ADBUS2 = TDO (input)
+//   ADBUS3 = TMS (output)
+// Direction bitmask: bit=1 means output
+#define DIR_MASK  0x0B   // 0b00001011 = TCK, TDI, TMS as outputs
+#define INIT_VAL  0x08   // 0b00001000 = TMS=1 (idle high), TCK=0, TDI=0
+
+struct ftdi_context *ftdi_jtag_open(void) {
+    struct ftdi_context *ftdi = ftdi_new();
+    if (!ftdi) {
+        fprintf(stderr, "ftdi_new() failed\\n");
+        return NULL;
+    }
+
+    // Open the FT232H by VID/PID
+    if (ftdi_usb_open(ftdi, 0x0403, 0x6014) < 0) {
+        fprintf(stderr, "ftdi_usb_open: %s\\n", ftdi_get_error_string(ftdi));
+        ftdi_free(ftdi);
+        return NULL;
+    }
+
+    // Reset the device
+    ftdi_usb_reset(ftdi);
+
+    // Set bitbang mode on ADBUS pins
+    // BITMODE_BITBANG = 0x01 for synchronous bit-bang
+    if (ftdi_set_bitmode(ftdi, DIR_MASK, BITMODE_BITBANG) < 0) {
+        fprintf(stderr, "ftdi_set_bitmode: %s\\n", ftdi_get_error_string(ftdi));
+        ftdi_usb_close(ftdi);
+        ftdi_free(ftdi);
+        return NULL;
+    }
+
+    // Set baud rate -- actual bit-bang clock = baud * 16
+    // 9600 baud -> ~150 kHz toggle rate -> ~75 kHz TCK
+    // For faster JTAG, use MPSSE mode instead of bitbang
+    ftdi_set_baudrate(ftdi, 9600);
+
+    // Write initial pin state: TMS=1, TCK=0, TDI=0
+    unsigned char init = INIT_VAL;
+    ftdi_write_data(ftdi, &init, 1);
+
+    printf("FT232H opened for JTAG bit-bang.\\n");
+    printf("  TCK=ADBUS0, TDI=ADBUS1, TDO=ADBUS2, TMS=ADBUS3\\n");
+    return ftdi;
+}
+
+// Implement gpio_write/gpio_read using this ftdi context:
+static struct ftdi_context *g_ftdi;
+
+void gpio_write(uint8_t pins, uint8_t values) {
+    // Read current state, mask out the pins we are setting, apply new values
+    static uint8_t current = INIT_VAL;
+    current = (current & ~pins) | (values & pins);
+    ftdi_write_data(g_ftdi, &current, 1);
+}
+
+uint8_t gpio_read(uint8_t pin) {
+    unsigned char buf;
+    ftdi_read_pins(g_ftdi, &buf);
+    return buf & pin;
+}
+
+void delay_us(unsigned int us) {
+    // In bitbang mode, the USB latency (~1ms) dominates.
+    // For precise timing, use MPSSE mode instead.
+    (void)us;
+}
+
+int main(void) {
+    g_ftdi = ftdi_jtag_open();
+    if (!g_ftdi) return 1;
+
+    // Now you can call jtag_reset(), jtag_read_idcode(), etc.
+    // from the earlier bit-bang code, using these gpio functions.
+
+    printf("Ready. Use jtag_reset() + jtag_read_idcode() to test.\\n");
+
+    ftdi_set_bitmode(g_ftdi, 0, BITMODE_RESET);
+    ftdi_usb_close(g_ftdi);
+    ftdi_free(g_ftdi);
+    return 0;
+}`,
+        },
+        {
           type: "info",
           variant: "tip",
           title: "The Five-TMS-1 Rule",
@@ -562,6 +692,39 @@ for our SoC, and is available in a 256-ball BGA with 0.8mm pitch.</p>
 a combination of a switching regulator (for efficiency on the high-current
 1.1V core rail) and LDOs for the lower-current rails.</p>
 
+<h4>Power Sequencing: Why Order Matters</h4>
+
+<p>FPGAs are extremely sensitive to the <strong>order</strong> in which their
+power rails come up. The ECP5 datasheet specifies: <strong>VCC (1.1V core)
+must be stable before or simultaneously with VCCIO (3.3V)</strong>. The
+auxiliary rail VCCAUX (2.5V) should come up after VCC but before VCCIO, or
+simultaneously with VCC. The recommended sequence is:</p>
+
+<ol>
+  <li><strong>VCC (1.1V)</strong> &mdash; core supply first</li>
+  <li><strong>VCCAUX (2.5V)</strong> &mdash; auxiliary supply second</li>
+  <li><strong>VCCIO (3.3V)</strong> &mdash; I/O supply last</li>
+</ol>
+
+<p><strong>What happens if you violate this?</strong> If VCCIO comes up while
+VCC is still at zero, the I/O pin protection diodes can forward-bias into the
+unpowered core, injecting current into the core logic. This causes
+<strong>latch-up</strong>: a parasitic thyristor structure inside the CMOS
+silicon turns on and creates a low-impedance path from the supply rail to
+ground. Latch-up draws massive current (amps) and can permanently destroy
+the FPGA within milliseconds. Even if latch-up does not occur, the
+I/O pins may exceed their <strong>absolute maximum ratings</strong> &mdash;
+the datasheet specifies that VCCIO must not exceed VCC + 0.5V. Violating
+this stresses the oxide layers and degrades the device over time, even if
+it appears to work initially.</p>
+
+<p>In our design, sequencing is handled by connecting the <code>EN</code>
+(enable) pins of the 2.5V and 3.3V regulators to the output of the
+previous regulator in the chain. The 1.1V regulator is always enabled, the
+2.5V regulator enables when VCC is stable, and the 3.3V regulator enables
+when VCCAUX is stable. This costs nothing extra &mdash; just a few traces
+&mdash; and protects a $10-$50 FPGA from destruction.</p>
+
 <h4>3. Clock Source</h4>
 
 <p>A crystal oscillator provides the reference clock. A 25 MHz or 50 MHz
@@ -592,6 +755,42 @@ for loading bitstreams.</p>
       with debounce capacitor.</li>
 </ul>
 
+<h4>6. SPI Configuration Flash</h4>
+
+<p>When you program an FPGA over JTAG, the bitstream is stored in volatile
+SRAM &mdash; it is lost on power-off. For the FPGA to boot autonomously
+(without a JTAG adapter), you need a <strong>SPI flash chip</strong> that
+holds the bitstream and feeds it to the FPGA at power-on.</p>
+
+<p><strong>Boot mode pins:</strong> The ECP5 has configuration mode pins
+(CFG0, CFG1, CFG2) that tell it where to load its bitstream from. For SPI
+flash boot, set CFG[2:0] = <code>001</code> (pull CFG0 high, CFG1 and CFG2
+low with 10k resistors). The FPGA will act as a SPI master and read the
+bitstream from the flash chip starting at address 0x000000.</p>
+
+<p><strong>How it works at power-on:</strong> After all power rails are stable
+and the PROGRAMN pin is released (high), the FPGA samples the CFG pins,
+enters Master SPI mode, drives the SPI clock (CCLK), asserts chip-select
+(CSSPIN), and reads the bitstream from flash over MISO (DI pin on flash).
+The entire bitstream (~600KB for ECP5-25F) loads in about 50ms at the
+default 2.4 MHz SPI clock. Once the bitstream is loaded and the CRC checks
+pass, the FPGA enters user mode and starts executing your design.</p>
+
+<p><strong>Programming the flash:</strong> You have two options:</p>
+<ul>
+  <li><strong>Via JTAG:</strong> Tools like <code>ecpprog</code> can program
+      the SPI flash <em>through</em> the FPGA by using the JTAG-to-SPI
+      bridge built into the ECP5. Command: <code>ecpprog -S bitstream.bit</code>
+      (the <code>-S</code> flag targets the SPI flash instead of SRAM).</li>
+  <li><strong>Direct SPI:</strong> Connect a SPI programmer (or a second FTDI
+      adapter) directly to the flash chip. This is useful if the FPGA is
+      not responding over JTAG.</li>
+</ul>
+
+<p>A 32 Mbit (4 MB) flash like the W25Q32JV is sufficient for even the
+largest ECP5 bitstreams, with room for multiple bitstream images or
+user data.</p>
+
 <h3>The Schematic</h3>
 
 <p>In KiCad's schematic editor (Eeschema), you draw the logical connections.
@@ -602,6 +801,45 @@ The schematic is organized into sheets, typically one per subsystem:</p>
   <li>Sheet 2: Power supply (regulators, input protection)</li>
   <li>Sheet 3: JTAG and configuration</li>
   <li>Sheet 4: Peripherals (UART, SD, Ethernet, LEDs)</li>
+</ul>
+
+<h3>Reading the FPGA Datasheet for Pin Assignments</h3>
+
+<p>One of the most important skills in FPGA board design is extracting pin
+information from the datasheet. Here is how to navigate it:</p>
+
+<p><strong>The ball map (pinout diagram):</strong> For BGA packages, the
+datasheet contains a grid showing every ball position (e.g., A1, B2, P16).
+Each ball is labeled with its function: user I/O pins are labeled with names
+like <code>PL2A</code> (meaning: <strong>P</strong>rimary bank,
+<strong>L</strong>eft side, pair <strong>2</strong>, pin <strong>A</strong>
+of the differential pair). Power balls are labeled VCC, VCCIO, GND, etc.
+Dedicated pins like TCK, TMS, TDI, TDO, PROGRAMN have fixed positions that
+you cannot change.</p>
+
+<p><strong>I/O banks:</strong> The FPGA&rsquo;s user I/O pins are organized
+into <strong>banks</strong> (numbered 0-8 on ECP5). Each bank has its own
+VCCIO supply, meaning all pins in that bank operate at whatever voltage you
+connect to that bank&rsquo;s VCCIO pin. This is critical: if your Ethernet
+PHY uses 3.3V I/O and your SD card also uses 3.3V, put them in the same bank
+(or banks powered at the same voltage). If you need mixed voltages (e.g.,
+1.8V for DDR3), use a separate bank with its own VCCIO supply set to 1.8V.
+Check the &ldquo;Pin Assignment&rdquo; table in the datasheet, which lists
+every pin, its ball position, its bank number, and its capabilities
+(input-only, differential-capable, global clock input, etc.).</p>
+
+<p><strong>Special pin categories to watch for:</strong></p>
+<ul>
+  <li><strong>Global clock inputs (GCLKx):</strong> Only certain pins can
+      drive the FPGA&rsquo;s clock network. Your oscillator must connect to
+      one of these.</li>
+  <li><strong>Differential pairs:</strong> Pins come in true/complement pairs
+      for LVDS signaling. Even if you use them single-ended, be aware of
+      the pairing.</li>
+  <li><strong>Configuration pins (CFG, CCLK, CSSPIN):</strong> Dual-purpose
+      pins used during configuration that become user I/O after boot. Be
+      careful connecting peripherals to these &mdash; they have specific
+      behavior during power-up.</li>
 </ul>
 
 <h3>Decoupling Capacitors: The Most Important Passives</h3>
@@ -807,6 +1045,36 @@ to the reference plane, W is the trace width, and T is the copper
 thickness. For a typical 4-layer board with 0.2mm prepreg, a 0.15mm wide
 trace gives approximately 50 ohms impedance.</p>
 
+<p><strong>Intuition for the impedance formula:</strong> You do not need to
+memorize the equation, but understanding what each parameter does will help
+you make good layout decisions:</p>
+
+<ul>
+  <li><strong>Wider traces (larger W) = lower impedance.</strong> A wider
+      trace has more capacitance to the ground plane (like widening the
+      plates of a capacitor). More capacitance per unit length lowers the
+      characteristic impedance. This is why power traces are wide &mdash;
+      you want low impedance to deliver current easily.</li>
+  <li><strong>Closer to the ground plane (smaller H) = lower impedance.</strong>
+      Moving the trace closer to its reference plane increases the
+      capacitance (same as moving capacitor plates closer together). It
+      also reduces the loop area for return current, which reduces
+      inductance. Both effects lower impedance.</li>
+  <li><strong>Higher dielectric constant (larger Er) = lower impedance.</strong>
+      A &ldquo;better&rdquo; insulator between the trace and ground plane
+      stores more electric field energy, increasing capacitance and lowering
+      impedance. FR-4 has Er &asymp; 4.4; air would be 1.0.</li>
+  <li><strong>Thicker copper (larger T) = slightly lower impedance.</strong>
+      The effect is small compared to W and H, but thicker copper
+      increases the effective width slightly.</li>
+</ul>
+
+<p>The practical takeaway: if your impedance is too high, make the trace
+wider or use a thinner prepreg layer. If it is too low, make the trace
+narrower. Most PCB fabricators provide an online impedance calculator
+where you enter your stackup dimensions and it tells you the exact trace
+width needed for 50 ohms.</p>
+
 <p>If the impedance changes along a trace (e.g., at a via, a width change,
 or a connector), part of the signal reflects back. These
 <strong>reflections</strong> cause ringing, overshoot, and potentially
@@ -838,6 +1106,36 @@ slots in the ground plane under signal traces</strong>.</p>
       low-speed and forgiving.</li>
 </ol>
 
+<h4>The RMII Interface (Reduced Media Independent Interface)</h4>
+
+<p>Since our board includes an Ethernet PHY (LAN8720A), you need to
+understand <strong>RMII</strong> &mdash; the interface between the FPGA
+(acting as the MAC) and the PHY chip. RMII uses only 7 signals, making it
+much simpler to route than the full MII (which needs 16):</p>
+
+<ul>
+  <li><strong>REF_CLK</strong> (50 MHz) &mdash; A shared reference clock
+      that both the MAC and PHY use. Can be sourced by the PHY, an external
+      oscillator, or the FPGA. All data transfers are synchronous to this
+      clock.</li>
+  <li><strong>TX_EN</strong> &mdash; Transmit enable. The MAC asserts this
+      to tell the PHY that valid data is on the TXD lines.</li>
+  <li><strong>TXD[1:0]</strong> &mdash; Two transmit data bits per clock
+      cycle. At 50 MHz with 2-bit data, the throughput is 100 Mbit/s
+      (matching 100BASE-TX Ethernet).</li>
+  <li><strong>RXD[1:0]</strong> &mdash; Two receive data bits per clock
+      cycle from the PHY to the MAC.</li>
+  <li><strong>CRS_DV</strong> &mdash; Carrier Sense / Data Valid. The PHY
+      asserts this when it is receiving valid data. It multiplexes two MII
+      signals (CRS and RX_DV) onto one pin by toggling between them on
+      alternate nibble boundaries.</li>
+</ul>
+
+<p>When routing RMII, keep the traces short (under 50mm), length-matched
+to within 2mm of each other, and referenced to the ground plane. The 50 MHz
+REF_CLK is the most timing-critical signal &mdash; ensure it arrives at
+both the FPGA and PHY pins with minimal skew.</p>
+
 <h4>BGA Fanout</h4>
 
 <p>If your FPGA is in a BGA package, you need to "fan out" the inner ball
@@ -857,6 +1155,58 @@ for 0.8mm pitch BGA:</p>
           variant: "warning",
           title: "BGA Soldering at Home",
           html: "BGA packages cannot be hand-soldered with a regular iron. You need either a reflow oven (a modified toaster oven with a temperature controller works surprisingly well for prototypes), a hot air rework station, or a PCBA assembly service. For a first board, consider using a TQFP or QFP packaged FPGA instead -- they can be hand-soldered with flux, a fine-tip iron, and patience. The Lattice ECP5 is also available in TQFP-144, though with fewer I/O pins.",
+        },
+        {
+          type: "text",
+          html: `
+<h3>Generating Gerber Files for Fabrication</h3>
+
+<p>Once your PCB layout passes DRC (Design Rule Check), you need to export
+<strong>Gerber files</strong> &mdash; the industry-standard format that every
+PCB fabricator accepts. In KiCad, go to <em>File &gt; Plot</em> in the PCB
+editor. You need to export these layers:</p>
+
+<ol>
+  <li><strong>F.Cu</strong> (Front Copper) &mdash; Top signal layer</li>
+  <li><strong>In1.Cu</strong> (Inner Copper 1) &mdash; Ground plane</li>
+  <li><strong>In2.Cu</strong> (Inner Copper 2) &mdash; Power plane</li>
+  <li><strong>B.Cu</strong> (Back Copper) &mdash; Bottom signal layer</li>
+  <li><strong>F.SilkS</strong> (Front Silkscreen) &mdash; Component labels</li>
+  <li><strong>B.SilkS</strong> (Back Silkscreen) &mdash; Bottom labels</li>
+  <li><strong>F.Mask</strong> (Front Solder Mask) &mdash; Mask openings for pads</li>
+  <li><strong>B.Mask</strong> (Back Solder Mask) &mdash; Bottom mask openings</li>
+  <li><strong>F.Paste</strong> (Front Paste) &mdash; Stencil for solder paste (needed for reflow assembly)</li>
+  <li><strong>B.Paste</strong> (Back Paste) &mdash; Bottom stencil</li>
+  <li><strong>Edge.Cuts</strong> &mdash; Board outline</li>
+</ol>
+
+<p><strong>Drill files:</strong> In addition to Gerbers, you must generate
+drill files separately. In KiCad: <em>File &gt; Generate Drill Files</em>.
+Select Excellon format, millimeters, and include both plated (PTH) and
+non-plated (NPTH) holes. Most fabs expect two separate drill files.</p>
+
+<p><strong>Pre-order checklist:</strong></p>
+<ul>
+  <li>Open each Gerber in a viewer (KiCad&rsquo;s built-in Gerber viewer, or
+      the online viewers at JLCPCB/OSHPark) and visually inspect every layer.</li>
+  <li>Verify the board outline (Edge.Cuts) is a closed shape with no gaps.</li>
+  <li>Check that drill holes line up with pads on the copper layers.</li>
+  <li>Confirm the layer count matches what you are ordering (4-layer).</li>
+  <li>Verify the minimum trace width and clearance meet the fab&rsquo;s
+      capabilities (JLCPCB: 0.09mm min for standard, 0.127mm recommended;
+      OSHPark: 0.15mm min).</li>
+  <li>Check that the smallest via drill size is within the fab&rsquo;s range
+      (JLCPCB: 0.2mm min drill; OSHPark: 0.25mm min drill).</li>
+  <li>If ordering assembly (PCBA), also export a BOM CSV and a
+      pick-and-place / centroid file (component X,Y positions and rotations).</li>
+</ul>
+
+<p>Upload the Gerber ZIP to <strong>JLCPCB</strong> (cheapest, 4-layer from ~$7
+for 5 boards, 5-7 day production) or <strong>OSHPark</strong> (US-based,
+excellent quality, 4-layer at $10/sq-inch, shared panel). Both sites show a
+rendered preview of your board before you order &mdash; inspect it
+carefully.</p>
+`,
         },
         {
           type: "info",
@@ -1077,7 +1427,92 @@ blink an LED. This tests:</p>
 
 <p>If the LED blinks at the expected rate, you have a working FPGA board.
 Everything from here is peripheral testing.</p>
+`,
+        },
+        {
+          type: "code",
+          label: "Minimal LED blink design for ECP5 (blink.v)",
+          code: `// blink.v -- Minimal LED blink for ECP5 board bring-up
+// 10 lines of synthesizable Verilog
 
+module blink (
+    input  wire clk,    // 25 MHz oscillator input
+    output wire led     // Active-low LED
+);
+    reg [23:0] counter = 0;
+
+    always @(posedge clk)
+        counter <= counter + 1;
+
+    assign led = ~counter[23]; // Toggles at 25MHz / 2^24 ≈ 1.5 Hz
+endmodule`,
+        },
+        {
+          type: "code",
+          label: "ECP5 pin constraint file (blink.lpf)",
+          code: `# blink.lpf -- Pin constraints for ECP5 LFE5U-25F-6BG256
+# Maps Verilog port names to physical ball positions
+# Adjust ball locations to match YOUR board's schematic
+
+# 25 MHz oscillator input -- must be on a global clock pin
+LOCATE COMP "clk" SITE "P6";            # Ball P6 = GCL0 (bank 6 clock input)
+IOBUF  PORT "clk" IO_TYPE=LVCMOS33;     # 3.3V CMOS logic level
+FREQUENCY PORT "clk" 25.0 MHz;          # Inform tools of clock frequency
+
+# LED output
+LOCATE COMP "led" SITE "B2";            # Ball B2 = user I/O (bank 0)
+IOBUF  PORT "led" IO_TYPE=LVCMOS33;     # 3.3V output
+
+# Note: LOCATE assigns a Verilog port to a physical ball.
+#       IOBUF sets the I/O standard (voltage level, drive strength).
+#       FREQUENCY tells nextpnr the clock rate for timing analysis.
+#       Ball positions come from YOUR schematic -- check which ball
+#       your oscillator and LED are wired to.`,
+        },
+        {
+          type: "code",
+          label: "ECP5 open-source synthesis, place-and-route, and programming commands",
+          code: `#!/bin/bash
+# build_and_program.sh -- Complete ECP5 FPGA build flow
+# Requires: yosys, nextpnr-ecp5, ecppack (from Project Trellis), ecpprog
+
+# Step 1: SYNTHESIS (Yosys)
+# Converts Verilog RTL into a gate-level netlist of ECP5 primitives.
+# Input: Verilog source files
+# Output: JSON netlist
+yosys -p "read_verilog blink.v; synth_ecp5 -top blink -json blink.json"
+
+# Step 2: PLACE AND ROUTE (nextpnr-ecp5)
+# Takes the netlist and pin constraints, maps logic to physical LUTs
+# and routes wires between them. Performs timing analysis.
+# --25k        = target the LFE5U-25F (25K LUT) device
+# --package    = BGA256 package
+# --speed 6    = speed grade 6
+# --lpf        = pin constraint file
+# --textcfg    = output: text-format configuration for ecppack
+nextpnr-ecp5 --25k --package CABGA256 --speed 6 \\
+    --json blink.json \\
+    --lpf blink.lpf \\
+    --textcfg blink_out.config
+
+# Step 3: BITSTREAM GENERATION (ecppack)
+# Converts the text configuration into a binary bitstream file.
+# --compress   = enable bitstream compression (smaller, faster load)
+# --svf        = also generate SVF file (for OpenOCD programming)
+ecppack --compress --svf blink.svf blink_out.config blink.bit
+
+# Step 4: PROGRAM (ecpprog)
+# Loads the bitstream into the FPGA via JTAG (volatile -- lost on power-off)
+ecpprog blink.bit
+
+# To program the SPI flash instead (persistent across power cycles):
+# ecpprog -S blink.bit
+
+echo "Done. LED should be blinking at ~1.5 Hz."`,
+        },
+        {
+          type: "text",
+          html: `
 <h3>Stage 4: Peripheral Testing</h3>
 
 <p>Test each peripheral subsystem independently:</p>
@@ -1142,6 +1577,52 @@ scan_chain
 #
 # Or use ecpprog directly:
 #   ecpprog -I "A" bitstream.bit`,
+        },
+        {
+          type: "text",
+          html: `
+<h4>Decoding the OpenOCD Configuration Values</h4>
+
+<p>The OpenOCD config above contains hex values that look opaque. Here is
+what they actually mean:</p>
+
+<p><code>ftdi layout_init 0x0008 0x000b</code></p>
+
+<p>This command takes two arguments: <strong>initial pin values</strong> and
+<strong>pin directions</strong>. Each bit corresponds to an ADBUS pin on
+the FT232H:</p>
+
+<ul>
+  <li><strong>0x000b = 0b00001011</strong> (direction mask): Bit 0 (ADBUS0/TCK) =
+      output, Bit 1 (ADBUS1/TDI) = output, Bit 2 (ADBUS2/TDO) = input
+      (0 = input), Bit 3 (ADBUS3/TMS) = output. So TCK, TDI, TMS are
+      driven by the adapter; TDO is read from the FPGA.</li>
+  <li><strong>0x0008 = 0b00001000</strong> (initial value): TMS starts high
+      (bit 3 = 1), TCK and TDI start low (bits 0,1 = 0). TMS high at
+      startup is correct because it keeps the TAP controller in
+      Test-Logic-Reset (the safe idle state).</li>
+</ul>
+
+<p><code>ftdi layout_signal nTRST -data 0x0010</code></p>
+
+<p>This maps the TRST signal to ADBUS4 (bit 4 = 0x0010). The
+<code>n</code> prefix means active-low: when OpenOCD asserts TRST, it
+drives ADBUS4 low, which pulls the FPGA&rsquo;s PROGRAMN pin low and
+forces reconfiguration.</p>
+
+<p><code>adapter speed 1000</code></p>
+
+<p>Sets the JTAG clock (TCK) frequency to 1 MHz. Start slow for
+debugging; a working board can typically handle 10-25 MHz.</p>
+
+<p><code>jtag newtap ecp5 tap -irlen 8 -expected-id 0x41111043</code></p>
+
+<p>Declares a JTAG TAP named &ldquo;ecp5.tap&rdquo; with an 8-bit
+instruction register. The <code>-expected-id</code> is the IDCODE that
+OpenOCD will verify when it first connects. If the IDCODE read back does
+not match, OpenOCD will report an error &mdash; this is your first
+indication of a wiring or power problem.</p>
+`,
         },
         {
           type: "code",
@@ -1283,6 +1764,42 @@ done it. You have gone from a transistor -- a switch made of doped
 silicon -- all the way up to a working computer. You understand every
 single layer because you built every single layer.</p>
 
+<h3>Timing Closure and Reading nextpnr Reports</h3>
+
+<p>When nextpnr finishes place-and-route, it performs <strong>static timing
+analysis</strong> and reports whether your design meets timing. The key
+output to look for:</p>
+
+<pre>Info: Max frequency for clock 'clk': 62.35 MHz (PASS at 25.00 MHz)</pre>
+
+<p>This means the longest combinational path in your design can run at
+62.35 MHz, and since you requested 25 MHz (via the <code>.lpf</code> file),
+timing is met with comfortable margin. If you see <strong>FAIL</strong>,
+the design has paths that are too slow for the requested clock frequency.
+The report will list the <strong>critical path</strong> &mdash; the
+longest chain of logic and routing between two flip-flops. It typically
+looks like:</p>
+
+<pre>Info: Critical path: net &ldquo;cpu/alu_result_15&rdquo; from cell &ldquo;cpu/alu_reg[15]&rdquo;
+      to cell &ldquo;cpu/writeback_reg[15]&rdquo; delay 18.3ns (logic 6.2ns, routing 12.1ns)</pre>
+
+<p><strong>How to fix timing failures:</strong></p>
+<ul>
+  <li><strong>If routing delay dominates:</strong> The placer put the cells
+      too far apart. Try running nextpnr with <code>--seed N</code> (different
+      random seeds give different placements) or <code>--timing-allow-fail</code>
+      to see if a different seed succeeds.</li>
+  <li><strong>If logic delay dominates:</strong> Your combinational path has
+      too many levels of logic. Add a pipeline register to break the path
+      into two clock cycles. This is the most common fix in FPGA design.</li>
+  <li><strong>Lower the clock frequency:</strong> If your design does not
+      need 50 MHz, targeting 25 MHz gives the tools much more slack.</li>
+</ul>
+
+<p>Always check that timing passes before programming the FPGA. A design
+that fails timing may appear to work sometimes but exhibit random,
+difficult-to-debug glitches.</p>
+
 <h3>Debugging Hardware with Instruments</h3>
 
 <h4>The Oscilloscope</h4>
@@ -1415,6 +1932,12 @@ open-source PulseView/Sigrok software can decode dozens of protocols.</p>
           variant: "warning",
           title: "Safety During Bring-up",
           html: "Always use a current-limited power supply for first power-on. Keep a fire extinguisher nearby when testing new boards (only half joking). Never probe a board with wet hands. Be careful with charged capacitors -- large bulk caps can hold enough energy to damage components if shorted. If a component starts smoking, disconnect power immediately. A smoking component is destroyed, but the rest of the board may be salvageable if you act fast.",
+        },
+        {
+          type: "info",
+          variant: "warning",
+          title: "ESD Protection: Static Electricity Destroys FPGAs",
+          html: "FPGA gate oxide layers are only a few nanometers thick. A static discharge from your body (which you may not even feel below ~3,000V) can punch through this oxide and permanently damage the chip. <strong>Always wear a grounded ESD wrist strap</strong> when handling bare PCBs with ICs. Work on a <strong>grounded ESD mat</strong> (conductive foam or a commercial anti-static mat connected to earth ground through a 1M-ohm resistor). Store boards in <strong>anti-static bags</strong> (the pink or silver-shielded kind, not regular plastic bags). Never touch the FPGA or PHY chip pins directly. Avoid synthetic clothing and carpeted floors in your workspace -- both generate static. These precautions are not optional: ESD damage is cumulative and often causes subtle, intermittent failures that are nearly impossible to debug.",
         },
         {
           type: "video",
